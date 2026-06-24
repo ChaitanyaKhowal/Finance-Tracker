@@ -60,7 +60,7 @@ const safeStorage = (() => {
     window.localStorage.setItem(testKey, "1");
     window.localStorage.removeItem(testKey);
     return window.localStorage;
-  } catch (e) {
+  } catch {
     return {
       getItem: (k) => (k in memoryStore ? memoryStore[k] : null),
       setItem: (k, v) => {
@@ -158,7 +158,7 @@ function readAuthRecord() {
   try {
     const raw = safeStorage.getItem(AUTH_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -175,7 +175,7 @@ function readSession() {
   try {
     const raw = safeStorage.getItem(SESSION_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }
@@ -712,7 +712,9 @@ function loadTransactions() {
   const seeded = seedTransactions();
   try {
     safeStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-  } catch (e) { }
+  } catch {
+    console.warn("Could not seed initial transactions to storage");
+  }
   return seeded;
 }
 
@@ -727,7 +729,7 @@ function saveTransactions(txns) {
 function loadTheme() {
   try {
     return safeStorage.getItem(THEME_KEY) || "dark";
-  } catch (e) {
+  } catch {
     return "dark";
   }
 }
