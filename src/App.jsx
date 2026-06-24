@@ -13,8 +13,8 @@ import {
 ----------------------------------------------------------------*/
 
 const INCOME_CATEGORIES = ["Salary", "Freelancing", "Business", "Other"];
-const EXPENSE_CATEGORIES = ["Food", "Travel", "Shopping", "Medical", "Education", "Family", "Other"];
-const PAYMENT_MODES = ["Cash", "UPI", "Bank Transfer", "Debit Card", "Credit Card"];
+const EXPENSE_CATEGORIES = ["Food", "Rent", "Transport", "Entertainment", "Shopping", "Bills", "Health", "Misc", "Debt", "Investment", "Saved", "Home", "Travel", "Medical", "Education", "Family", "Other"];
+const PAYMENT_MODES = ["Cash", "UPI", "Online", "Bank Transfer", "Debit Card", "Credit Card"];
 
 /* Data model (future-proof for budgets / analytics / yearly reports):
    {
@@ -606,27 +606,51 @@ function importRowsToTransactions(rows) {
 
   rows.forEach((row, idx) => {
     const rowNum = idx + 2; // +2: header row + 1-indexing
-    const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(row.date || "");
-    const amountNum = parseFloat(row.amount);
-    const typeOk = row.type === "income" || row.type === "expense";
+
+    const rawDate = (row.date || row.Date || "").trim();
+    let normalizedDate = rawDate;
+    if (/^\d{2}-\d{2}-\d{4}$/.test(rawDate)) {
+      const [dd, mm, yyyy] = rawDate.split("-");
+      normalizedDate = `${yyyy}-${mm}-${dd}`;
+    }
+
+    const rawType = String(row.type || row.Type || "").trim().toLowerCase();
+    const rawAmount = String(row.amount || row.Amount || "")
+      .replace(/₹/g, "")
+      .replace(/,/g, "")
+      .trim();
+
+    const paymentMode =
+      row.paymentMode ||
+      row["Payment Method"] ||
+      row["payment method"] ||
+      "Cash";
+
+    const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate || "");
+    const amountNum = parseFloat(rawAmount);
+    const typeOk = rawType === "income" || rawType === "expense";
 
     if (!dateOk) return errors.push({ row: rowNum, reason: "Invalid or missing date (expected YYYY-MM-DD)" });
-    if (!row.description) return errors.push({ row: rowNum, reason: "Missing description" });
+    if (!row.description || !row.description.trim()) {
+      row.description = row.category
+        ? `${row.category} Expense`
+        : "Unknown Expense";
+    }
     if (!typeOk) return errors.push({ row: rowNum, reason: 'Type must be "income" or "expense"' });
     if (!Number.isFinite(amountNum) || amountNum <= 0)
       return errors.push({ row: rowNum, reason: "Amount must be a positive number" });
 
-    const fallbackCategories = row.type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    const fallbackCategories = rawType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
     const category = fallbackCategories.includes(row.category) ? row.category : "Other";
 
     valid.push(
       normalizeTransaction({
-        date: row.date,
+        date: normalizedDate,
         description: row.description,
         category,
-        type: row.type,
+        type: rawType,
         amount: amountNum,
-        paymentMode: row.paymentMode,
+        paymentMode,
         notes: row.notes,
       })
     );
@@ -685,7 +709,7 @@ function loadTransactions() {
   const seeded = seedTransactions();
   try {
     safeStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-  } catch (e) {}
+  } catch (e) { }
   return seeded;
 }
 
@@ -1369,6 +1393,12 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     fileInputRef.current?.click();
   }, []);
 
+
+  function getMonthKey(dateStr) {
+    const d = new Date(dateStr);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+
   const handleImportFile = useCallback((e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1379,7 +1409,17 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
         const rows = parseCSV(String(reader.result));
         const { valid, errors } = importRowsToTransactions(rows);
         if (valid.length) {
-          setTransactions((prev) => [...valid, ...prev]);
+          setTransactions((prev) => {
+            const importedMonths = new Set(
+              valid.map((tx) => getMonthKey(tx.date))
+            );
+
+            const remainingTransactions = prev.filter(
+              (tx) => !importedMonths.has(getMonthKey(tx.date))
+            );
+
+            return [...valid, ...remainingTransactions];
+          });
         }
         setImportResult({ added: valid.length, errors });
       } catch (err) {
@@ -1867,7 +1907,7 @@ export default function FinanceTracker() {
   useEffect(() => {
     try {
       safeStorage.setItem(THEME_KEY, theme);
-    } catch (e) {}
+    } catch (e) { }
   }, [theme]);
 
   const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
