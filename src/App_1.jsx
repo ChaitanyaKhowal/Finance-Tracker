@@ -4,8 +4,7 @@ import {
   TrendingUp, TrendingDown, Pencil, Trash2, X, Moon, Sun,
   ChevronDown, ArrowUpDown, Filter, ReceiptText, Download, Upload,
   CalendarClock, CalendarDays, ChevronLeft, ChevronRight, BarChart3,
-  Minus, Tag, Receipt, ListChecks, SlidersHorizontal,
-  LogOut, Lock, User, Eye, EyeOff, ShieldCheck, AlertTriangle
+  Minus, Tag, Receipt, ListChecks, SlidersHorizontal
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -86,158 +85,6 @@ const fmtDate = (iso) => {
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-
-/* ---------------------------------------------------------------
-   AUTHENTICATION MODULE
-   ---------------------------------------------------------------
-   IMPORTANT, HONEST CAVEAT: this is a privacy screen, not real
-   security. Credentials and the password hash live in this browser's
-   localStorage, in plain JSON. Anyone with access to the device and
-   dev tools (or just localStorage.getItem) can read it directly —
-   client-side storage cannot be made secure against the device's own
-   user. What this DOES achieve: the financial data isn't shown to
-   someone who casually opens the page, and a password is never
-   stored in plaintext, only as a salted hash.
-
-   FUTURE-READY SHAPE: every function below is written the way its
-   eventual Spring Boot equivalent would be called, so swapping the
-   body for a real fetch() to a backend later is a small, contained
-   change — no caller code (LoginScreen, AuthProvider) needs to change:
-
-     hasCredentials()                 -> GET  /api/auth/exists
-     authService.register(u, p)       -> POST /api/auth/register
-     authService.login(u, p)          -> POST /api/auth/login        (returns a JWT instead of a local session)
-     authService.logout()             -> POST /api/auth/logout       (or just discard the JWT client-side)
-     authService.getSession()         -> read JWT from storage + verify/decode instead of reading local JSON
-     authService.changePassword(...)  -> POST /api/auth/change-password
-
-   All of these are already async, returning { ok, error } shaped
-   results, so the calling components never need to know whether the
-   implementation is local hashing or a network call.
-----------------------------------------------------------------*/
-
-const AUTH_KEY = "pft_auth_v1"; // { username, salt, hash }
-const SESSION_KEY = "pft_session_v1"; // { username, loggedInAt }
-
-/** Converts a Uint8Array / ArrayBuffer to a hex string. */
-const bufToHex = (buf) =>
-  Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-const randomSalt = () => {
-  const bytes = new Uint8Array(16);
-  if (window.crypto?.getRandomValues) window.crypto.getRandomValues(bytes);
-  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return bufToHex(bytes);
-};
-
-/** Salted SHA-256 hash via the browser's native SubtleCrypto. Falls
- *  back to a (weaker, but still non-plaintext) string hash if
- *  SubtleCrypto is unavailable, e.g. on a non-HTTPS origin — this
- *  keeps first-run setup from hard-failing in that edge case while
- *  still never persisting the raw password. */
-async function hashPassword(password, salt) {
-  const input = `${salt}:${password}`;
-  if (window.crypto?.subtle?.digest) {
-    const data = new TextEncoder().encode(input);
-    const digest = await window.crypto.subtle.digest("SHA-256", data);
-    return bufToHex(digest);
-  }
-  // Fallback: simple non-cryptographic hash (DJB2). Only reached when
-  // SubtleCrypto truly isn't available (very old browser, or non-secure context).
-  let hash = 5381;
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash * 33) ^ input.charCodeAt(i);
-  }
-  return "djb2_" + (hash >>> 0).toString(16);
-}
-
-function readAuthRecord() {
-  try {
-    const raw = safeStorage.getItem(AUTH_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function writeAuthRecord(record) {
-  try {
-    safeStorage.setItem(AUTH_KEY, JSON.stringify(record));
-  } catch (e) {
-    console.error("Failed to save credentials", e);
-  }
-}
-
-function readSession() {
-  try {
-    const raw = safeStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-/** Whether any credentials have ever been set up on this device —
- *  the signal LoginScreen uses to decide "show setup" vs "show login". */
-const hasCredentials = () => !!readAuthRecord();
-
-/** The auth service: a small async interface kept deliberately
- *  identical in shape to what a real backend client would expose.
- *  Swapping localStorage for fetch() calls later means editing only
- *  inside these four functions. */
-const authService = {
-  async register(username, password) {
-    const trimmed = username.trim();
-    if (!trimmed) return { ok: false, error: "Username is required." };
-    if (!password || password.length < 4) return { ok: false, error: "Password must be at least 4 characters." };
-
-    const salt = randomSalt();
-    const hash = await hashPassword(password, salt);
-    writeAuthRecord({ username: trimmed, salt, hash, createdAt: new Date().toISOString() });
-    safeStorage.setItem(SESSION_KEY, JSON.stringify({ username: trimmed, loggedInAt: new Date().toISOString() }));
-    return { ok: true, username: trimmed };
-  },
-
-  async login(username, password) {
-    const record = readAuthRecord();
-    if (!record) return { ok: false, error: "No account set up on this device yet." };
-
-    const trimmed = username.trim();
-    if (trimmed.toLowerCase() !== record.username.toLowerCase()) {
-      return { ok: false, error: "Incorrect username or password." };
-    }
-    const hash = await hashPassword(password, record.salt);
-    if (hash !== record.hash) {
-      return { ok: false, error: "Incorrect username or password." };
-    }
-    safeStorage.setItem(SESSION_KEY, JSON.stringify({ username: record.username, loggedInAt: new Date().toISOString() }));
-    return { ok: true, username: record.username };
-  },
-
-  logout() {
-    safeStorage.removeItem(SESSION_KEY);
-  },
-
-  getSession() {
-    return readSession();
-  },
-
-  /** Lets a logged-in user change their password without resetting
-   *  the device's "first-run" state. Not wired into the UI yet (not
-   *  in the current requirements) but kept here so it's a one-screen
-   *  addition later rather than new architecture. */
-  async changePassword(currentPassword, newPassword) {
-    const record = readAuthRecord();
-    if (!record) return { ok: false, error: "No account exists." };
-    const currentHash = await hashPassword(currentPassword, record.salt);
-    if (currentHash !== record.hash) return { ok: false, error: "Current password is incorrect." };
-    if (!newPassword || newPassword.length < 4) return { ok: false, error: "New password must be at least 4 characters." };
-    const salt = randomSalt();
-    const hash = await hashPassword(newPassword, salt);
-    writeAuthRecord({ ...record, salt, hash });
-    return { ok: true };
-  },
-};
 
 /** Derives month (1-12) and year from a YYYY-MM-DD date string.
  *  Stored alongside each transaction (not computed on the fly) so that
@@ -706,153 +553,8 @@ function loadTheme() {
 }
 
 /* ---------------------------------------------------------------
-   AUTH UI: LOGIN / FIRST-RUN SETUP SCREEN
+   PRIMITIVE COMPONENTS
 ----------------------------------------------------------------*/
-
-function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
-  const isSetup = mode === "setup";
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError("");
-
-    if (isSetup) {
-      if (password !== confirmPassword) {
-        setError("Passwords don't match.");
-        return;
-      }
-    }
-
-    setSubmitting(true);
-    const result = isSetup
-      ? await authService.register(username, password)
-      : await authService.login(username, password);
-    setSubmitting(false);
-
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    onAuthenticated(result.username);
-  };
-
-  return (
-    <div className={`pft-root theme-${theme} auth-shell`}>
-      <style>{CSS}</style>
-
-      <div className="auth-card-wrap">
-        <button className="icon-btn theme-toggle auth-theme-toggle" onClick={onToggleTheme} aria-label="Toggle theme">
-          {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
-        </button>
-
-        <div className="auth-card">
-          <div className="brand auth-brand">
-            <div className="brand-mark">
-              <Wallet size={20} strokeWidth={2.4} />
-            </div>
-            <div className="brand-text">
-              <span className="brand-title">Ledger</span>
-              <span className="brand-sub">Personal Finance Tracker</span>
-            </div>
-          </div>
-
-          <h2 className="auth-heading">
-            {isSetup ? "Set up your account" : "Welcome back"}
-          </h2>
-          <p className="auth-subheading">
-            {isSetup
-              ? "Create a username and password to protect your financial data on this device."
-              : "Enter your credentials to view your dashboard."}
-          </p>
-
-          <form onSubmit={handleSubmit} className="auth-form">
-            <div className="form-field">
-              <label htmlFor="auth-username">Username</label>
-              <div className="input-with-icon">
-                <User size={15} />
-                <input
-                  id="auth-username"
-                  type="text"
-                  autoComplete="username"
-                  placeholder="e.g. priya"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  autoFocus
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="form-field">
-              <label htmlFor="auth-password">Password</label>
-              <div className="input-with-icon">
-                <Lock size={15} />
-                <input
-                  id="auth-password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete={isSetup ? "new-password" : "current-password"}
-                  placeholder={isSetup ? "At least 4 characters" : "Your password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={isSetup ? 4 : undefined}
-                />
-                <button
-                  type="button"
-                  className="input-icon-btn"
-                  onClick={() => setShowPassword((s) => !s)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                >
-                  {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
-              </div>
-            </div>
-
-            {isSetup && (
-              <div className="form-field">
-                <label htmlFor="auth-confirm">Confirm password</label>
-                <div className="input-with-icon">
-                  <Lock size={15} />
-                  <input
-                    id="auth-confirm"
-                    type={showPassword ? "text" : "password"}
-                    autoComplete="new-password"
-                    placeholder="Re-enter your password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    required
-                  />
-                </div>
-              </div>
-            )}
-
-            {error && (
-              <div className="auth-error">
-                <AlertTriangle size={14} />
-                {error}
-              </div>
-            )}
-
-            <button type="submit" className="btn btn-primary auth-submit" disabled={submitting}>
-              {submitting ? "Please wait..." : isSetup ? "Create account & continue" : "Log in"}
-            </button>
-          </form>
-
-          <div className="auth-footnote">
-            <ShieldCheck size={13} />
-            Your credentials and data stay on this device — nothing is sent anywhere.
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function KpiCard({ label, value, sub, icon: Icon, tone, pulse }) {
   return (
@@ -1152,7 +854,8 @@ function TransactionForm({ open, onClose, onSave, editing }) {
    MAIN APP
 ----------------------------------------------------------------*/
 
-function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
+export default function FinanceTracker() {
+  const [theme, setTheme] = useState(loadTheme);
   const [transactions, setTransactions] = useState(loadTransactions);
 
   const [formOpen, setFormOpen] = useState(false);
@@ -1176,6 +879,12 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   useEffect(() => {
     saveTransactions(transactions);
   }, [transactions]);
+
+  useEffect(() => {
+    try {
+      safeStorage.setItem(THEME_KEY, theme);
+    } catch (e) {}
+  }, [theme]);
 
   const allCategories = useMemo(
     () => Array.from(new Set(transactions.map((t) => t.category))).sort(),
@@ -1356,6 +1065,7 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   }, [deleteTarget]);
 
   const toggleSort = () => setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
 
   /* ---- CSV import / export ---- */
   const fileInputRef = useRef(null);
@@ -1397,8 +1107,6 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     setCategoryFilter("all");
   };
 
-  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
-
   return (
     <div className={`pft-root theme-${theme}`}>
       <style>{CSS}</style>
@@ -1412,14 +1120,12 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
             </div>
             <div className="brand-text">
               <span className="brand-title">Ledger</span>
-              <span className="brand-sub">
-                {currentUser ? `Signed in as ${currentUser}` : "Personal Finance Tracker"}
-              </span>
+              <span className="brand-sub">Personal Finance Tracker</span>
             </div>
           </div>
 
           <div className="header-actions">
-            <button className="icon-btn theme-toggle" onClick={onToggleTheme} aria-label="Toggle theme">
+            <button className="icon-btn theme-toggle" onClick={toggleTheme} aria-label="Toggle theme">
               {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
             </button>
             <input
@@ -1440,14 +1146,6 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
             <button className="btn btn-primary add-btn" onClick={openAddForm}>
               <Plus size={16} strokeWidth={2.5} />
               <span>Add transaction</span>
-            </button>
-            <button
-              className="icon-btn logout-btn"
-              onClick={() => setLogoutConfirmOpen(true)}
-              aria-label="Log out"
-              title="Log out"
-            >
-              <LogOut size={16} />
             </button>
           </div>
         </header>
@@ -1826,69 +1524,8 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
-      {logoutConfirmOpen && (
-        <div className="modal-overlay" onClick={() => setLogoutConfirmOpen(false)}>
-          <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
-            <h3>Log out?</h3>
-            <p>You'll need your username and password to view your data again on this device.</p>
-            <div className="modal-actions">
-              <button className="btn btn-ghost" onClick={() => setLogoutConfirmOpen(false)}>
-                Cancel
-              </button>
-              <button className="btn btn-danger" onClick={onLogout}>
-                Log out
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
-}
-
-/* ---------------------------------------------------------------
-   AUTH GATE — top-level export
-   ---------------------------------------------------------------
-   Decides which of three screens to show: first-run setup, login,
-   or the authenticated Dashboard. Session is checked once on mount
-   (restoring across page refreshes) and re-checked after any
-   login/logout action. Theme is read independently of auth state so
-   it persists across the login screen and the dashboard alike. */
-export default function FinanceTracker() {
-  const [theme, setTheme] = useState(loadTheme);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [session, setSession] = useState(null);
-
-  useEffect(() => {
-    setSession(authService.getSession());
-    setAuthChecked(true);
-  }, []);
-
-  useEffect(() => {
-    try {
-      safeStorage.setItem(THEME_KEY, theme);
-    } catch (e) {}
-  }, [theme]);
-
-  const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
-
-  const handleAuthenticated = useCallback((username) => {
-    setSession({ username, loggedInAt: new Date().toISOString() });
-  }, []);
-
-  const handleLogout = useCallback(() => {
-    authService.logout();
-    setSession(null);
-  }, []);
-
-  if (!authChecked) return null; // avoid a flash of the wrong screen while session is read
-
-  if (!session) {
-    const mode = hasCredentials() ? "login" : "setup";
-    return <LoginScreen mode={mode} onAuthenticated={handleAuthenticated} theme={theme} onToggleTheme={toggleTheme} />;
-  }
-
-  return <Dashboard onLogout={handleLogout} currentUser={session.username} theme={theme} onToggleTheme={toggleTheme} />;
 }
 
 /* ---------------------------------------------------------------
@@ -2381,110 +2018,6 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   color: var(--text-faint);
 }
 
-/* ---------- Auth: Login / Setup Screen ---------- */
-.auth-shell {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px 16px;
-}
-
-.auth-card-wrap {
-  position: relative;
-  width: 100%;
-  max-width: 420px;
-}
-
-.auth-theme-toggle {
-  position: absolute;
-  top: -52px;
-  right: 0;
-}
-
-.auth-card {
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: 20px;
-  padding: 32px 28px 26px;
-  box-shadow: var(--shadow);
-  animation: slideUp 0.25s ease;
-}
-
-.auth-brand { margin-bottom: 22px; }
-.auth-brand .brand-mark { width: 42px; height: 42px; border-radius: 13px; }
-
-.auth-heading {
-  font-family: 'Outfit', sans-serif;
-  font-size: 21px;
-  font-weight: 700;
-  margin: 0 0 6px;
-  letter-spacing: -0.01em;
-}
-.auth-subheading {
-  font-size: 13.5px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  margin: 0 0 22px;
-}
-
-.auth-form { display: flex; flex-direction: column; gap: 16px; }
-
-.input-with-icon {
-  display: flex; align-items: center; gap: 9px;
-  background: var(--input-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 10px;
-  padding: 0 12px;
-  transition: border-color 0.15s ease;
-}
-.input-with-icon:focus-within { border-color: #4ADE80; }
-.input-with-icon svg:first-child { color: var(--text-faint); flex-shrink: 0; }
-.input-with-icon input {
-  flex: 1;
-  border: none; background: transparent; outline: none;
-  padding: 10px 0;
-  font-size: 13.5px;
-  color: var(--text);
-  font-family: inherit;
-}
-.input-icon-btn {
-  display: flex; align-items: center; justify-content: center;
-  border: none; background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  padding: 4px;
-  flex-shrink: 0;
-}
-.input-icon-btn:hover { color: var(--text-muted); }
-
-.auth-error {
-  display: flex; align-items: flex-start; gap: 7px;
-  background: rgba(248,113,113,0.1);
-  border: 1px solid rgba(248,113,113,0.3);
-  color: #F87171;
-  font-size: 12.5px;
-  font-weight: 500;
-  padding: 10px 12px;
-  border-radius: 10px;
-  line-height: 1.4;
-}
-
-.auth-submit { width: 100%; padding: 11px 0; font-size: 14px; margin-top: 2px; }
-.auth-submit:disabled { opacity: 0.7; cursor: not-allowed; }
-
-.auth-footnote {
-  display: flex; align-items: center; gap: 6px;
-  justify-content: center;
-  margin-top: 20px;
-  font-size: 11.5px;
-  color: var(--text-faint);
-  text-align: center;
-}
-.auth-footnote svg { flex-shrink: 0; color: #4ADE80; }
-
-.logout-btn:hover { color: #F87171; border-color: #F87171; }
-
 /* ---------- Modal ---------- */
 .modal-overlay {
   position: fixed; inset: 0;
@@ -2610,8 +2143,6 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   .kpi-grid { grid-template-columns: 1fr; }
   .brand-sub { display: none; }
   .insights-grid { grid-template-columns: 1fr; }
-  .auth-card { padding: 26px 20px 22px; }
-  .auth-theme-toggle { top: -48px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
