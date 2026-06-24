@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Plus, Search, ArrowUpRight, ArrowDownRight, Wallet, PiggyBank,
   TrendingUp, TrendingDown, Pencil, Trash2, X, Moon, Sun,
-  ChevronDown, ArrowUpDown, Filter, ReceiptText, Download, Upload,
+  ChevronDown, Filter, ReceiptText, Download, Upload,
   CalendarClock, CalendarDays, ChevronLeft, ChevronRight, BarChart3,
   Minus, Tag, Receipt, ListChecks, SlidersHorizontal,
   LogOut, Lock, User, Eye, EyeOff, ShieldCheck, AlertTriangle
@@ -74,9 +74,12 @@ const safeStorage = (() => {
 })();
 
 const currency = (n) =>
-  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(
-    Number.isFinite(n) ? n : 0
-  );
+  new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(n) ? n : 0);
 
 const fmtDate = (iso) => {
   const d = new Date(iso + "T00:00:00");
@@ -804,7 +807,7 @@ function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
                   id="auth-username"
                   type="text"
                   autoComplete="username"
-                  placeholder="e.g. priya"
+                  placeholder="e.g. Chirag"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoFocus
@@ -983,7 +986,9 @@ function TransactionForm({ open, onClose, onSave, editing }) {
   const [errors, setErrors] = useState({});
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (editing) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setType(editing.type);
       setDate(editing.date);
       setDescription(editing.description);
@@ -992,6 +997,7 @@ function TransactionForm({ open, onClose, onSave, editing }) {
       setPaymentMode(editing.paymentMode || PAYMENT_MODES[0]);
       setNotes(editing.notes || "");
     } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setType("expense");
       setDate(todayISO());
       setDescription("");
@@ -1000,12 +1006,14 @@ function TransactionForm({ open, onClose, onSave, editing }) {
       setPaymentMode(PAYMENT_MODES[0]);
       setNotes("");
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setErrors({});
   }, [editing, open]);
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!categories.includes(category)) setCategory(categories[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type]);
@@ -1186,7 +1194,19 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
-  const [sortDir, setSortDir] = useState("desc"); // by date
+
+  // Multi-column sorting
+  const [sortKey, setSortKey] = useState("date"); // "date" | "description" | "category" | "paymentMode" | "amount"
+  const [sortDir, setSortDir] = useState("desc"); // "asc" | "desc"
+
+  // Pagination states
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Bulk action states
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false);
 
   /* ---- Time Period Analysis: global filter state ---- */
   const now = new Date();
@@ -1196,6 +1216,12 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   const [customStart, setCustomStart] = useState(todayISO());
   const [customEnd, setCustomEnd] = useState(todayISO());
   const [insightsOpen, setInsightsOpen] = useState(true);
+
+  // Auto-reset page when filter changes
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCurrentPage(1);
+  }, [search, typeFilter, categoryFilter, periodKey, pickedMonth, pickedYear, customStart, customEnd]);
 
   useEffect(() => {
     saveTransactions(transactions);
@@ -1258,8 +1284,6 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     () => buildYearlyBreakdown(transactions, yearlyViewYear),
     [transactions, yearlyViewYear]
   );
-
-  const isYearMode = periodKey === "current_year" || periodKey === "previous_year";
 
   const availableYears = useMemo(() => {
     const years = new Set(transactions.map((t) => t.year).filter(Boolean));
@@ -1337,13 +1361,31 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     }
 
     list = [...list].sort((a, b) => {
-      const da = new Date(a.date).getTime();
-      const db = new Date(b.date).getTime();
-      return sortDir === "asc" ? da - db : db - da;
+      let valA, valB;
+      if (sortKey === "date") {
+        valA = new Date(a.date).getTime();
+        valB = new Date(b.date).getTime();
+      } else if (sortKey === "amount") {
+        valA = a.amount;
+        valB = b.amount;
+      } else {
+        valA = String(a[sortKey] || "").toLowerCase();
+        valB = String(b[sortKey] || "").toLowerCase();
+      }
+
+      if (valA < valB) return sortDir === "asc" ? -1 : 1;
+      if (valA > valB) return sortDir === "asc" ? 1 : -1;
+      return 0;
     });
 
     return list;
-  }, [transactions, typeFilter, categoryFilter, search, sortDir]);
+  }, [transactions, typeFilter, categoryFilter, search, sortKey, sortDir]);
+
+  // Paginated Sliced list
+  const paginatedTransactions = useMemo(() => {
+    const startIdx = (currentPage - 1) * pageSize;
+    return visibleTransactions.slice(startIdx, startIdx + pageSize);
+  }, [visibleTransactions, currentPage, pageSize]);
 
   /* ---- handlers ---- */
   const openAddForm = useCallback(() => {
@@ -1375,11 +1417,70 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
 
   const confirmDelete = useCallback(() => {
     if (!deleteTarget) return;
-    setTransactions((prev) => prev.filter((t) => t.id !== deleteTarget.id));
+    const targetId = deleteTarget.id;
+    setTransactions((prev) => prev.filter((t) => t.id !== targetId));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(targetId);
+      return next;
+    });
     setDeleteTarget(null);
   }, [deleteTarget]);
 
-  const toggleSort = () => setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+  // Bulk action handlers
+  const handleToggleSelectRow = useCallback((id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleSelectAll = useCallback(() => {
+    const allVisibleIds = visibleTransactions.map((t) => t.id);
+    const areAllSelected = allVisibleIds.every((id) => selectedIds.has(id));
+
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (areAllSelected) {
+        // Deselect all visible
+        allVisibleIds.forEach((id) => next.delete(id));
+      } else {
+        // Select all visible
+        allVisibleIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }, [visibleTransactions, selectedIds]);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleConfirmBulkDelete = useCallback(() => {
+    setTransactions((prev) => prev.filter((t) => !selectedIds.has(t.id)));
+    setSelectedIds(new Set());
+    setBulkConfirmOpen(false);
+  }, [selectedIds]);
+
+  const handleConfirmDeleteAll = useCallback(() => {
+    setTransactions([]);
+    setSelectedIds(new Set());
+    setDeleteAllConfirmOpen(false);
+  }, []);
+
+  const handleSort = (key) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
 
   /* ---- CSV import / export ---- */
   const fileInputRef = useRef(null);
@@ -1400,34 +1501,64 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   }
 
   const handleImportFile = useCallback((e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const rows = parseCSV(String(reader.result));
-        const { valid, errors } = importRowsToTransactions(rows);
-        if (valid.length) {
-          setTransactions((prev) => {
-            const importedMonths = new Set(
-              valid.map((tx) => getMonthKey(tx.date))
-            );
+    const allValid = [];
+    const allErrors = [];
 
-            const remainingTransactions = prev.filter(
-              (tx) => !importedMonths.has(getMonthKey(tx.date))
-            );
+    Promise.all(
+      files.map(
+        (file) =>
+          new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              try {
+                const rows = parseCSV(String(reader.result));
+                const { valid, errors } = importRowsToTransactions(rows);
+                allValid.push(...valid);
+                allErrors.push(
+                  ...errors.map((err) => ({
+                    ...err,
+                    file: file.name,
+                  }))
+                );
+              } catch {
+                allErrors.push({
+                  file: file.name,
+                  row: "-",
+                  reason: "Could not read this file as CSV.",
+                });
+              }
+              resolve();
+            };
+            reader.readAsText(file);
+          })
+      )
+    ).then(() => {
+      if (allValid.length) {
+        setTransactions((prev) => {
+          const importedMonths = new Set(
+            allValid
+              .map((tx) => getMonthKey(tx.date))
+              .filter(Boolean)
+          );
 
-            return [...valid, ...remainingTransactions];
-          });
-        }
-        setImportResult({ added: valid.length, errors });
-      } catch (err) {
-        setImportResult({ added: 0, errors: [{ row: "-", reason: "Could not read this file as CSV." }] });
+          const remainingTransactions = prev.filter(
+            (tx) => !importedMonths.has(getMonthKey(tx.date))
+          );
+
+          return [...allValid, ...remainingTransactions];
+        });
       }
-    };
-    reader.readAsText(file);
-    e.target.value = ""; // allow re-selecting the same file
+
+      setImportResult({
+        added: allValid.length,
+        errors: allErrors,
+      });
+    });
+
+    e.target.value = ""; // allow re-selecting the same files
   }, []);
 
   const hasFilters = search || typeFilter !== "all" || categoryFilter !== "all";
@@ -1467,6 +1598,7 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
               type="file"
               accept=".csv,text/csv"
               onChange={handleImportFile}
+              multiple
               style={{ display: "none" }}
             />
             <button className="btn btn-ghost csv-btn" onClick={triggerImport}>
@@ -1477,6 +1609,12 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
               <Download size={15} />
               <span>Export CSV</span>
             </button>
+            {transactions.length > 0 && (
+              <button className="btn btn-ghost danger-btn" onClick={() => setDeleteAllConfirmOpen(true)} title="Delete all transactions from system">
+                <Trash2 size={15} />
+                <span>Delete All</span>
+              </button>
+            )}
             <button className="btn btn-primary add-btn" onClick={openAddForm}>
               <Plus size={16} strokeWidth={2.5} />
               <span>Add transaction</span>
@@ -1580,37 +1718,45 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
           )}
         </section>
 
-        {/* Dashboard — scoped to the selected period */}
-        <section className="kpi-grid" aria-label="Financial summary">
-          <KpiCard
-            label={`Income · ${range.label}`}
-            value={currency(periodTotals.income)}
-            sub={<ComparisonSub diff={comparison.incomeDiff} pct={comparison.incomePct} prevLabel={range.prevLabel} />}
-            icon={ArrowUpRight}
-            tone="income"
-          />
-          <KpiCard
-            label={`Expense · ${range.label}`}
-            value={currency(periodTotals.expense)}
-            sub={<ComparisonSub diff={comparison.expenseDiff} pct={comparison.expensePct} prevLabel={range.prevLabel} invert />}
-            icon={ArrowDownRight}
-            tone="expense"
-          />
-          <KpiCard
-            label={`Savings · ${range.label}`}
-            value={currency(periodTotals.savings)}
-            sub={<ComparisonSub diff={comparison.savingsDiff} pct={comparison.savingsPct} prevLabel={range.prevLabel} />}
-            icon={PiggyBank}
-            tone={periodTotals.savings >= 0 ? "income" : "expense"}
-          />
-          <KpiCard
-            label="Current Balance"
-            value={currency(allTimeTotals.balance)}
-            sub="Income minus expenses, all time"
-            icon={allTimeTotals.balance >= 0 ? TrendingUp : TrendingDown}
-            tone={allTimeTotals.balance >= 0 ? "balance" : "expense"}
-            pulse={periodTotals.pulse}
-          />
+        {/* Dashboard Hero KPI + Primary Period KPIs */}
+        <section className="kpi-grid-primary" aria-label="Primary Financial summary">
+          <div className="kpi-hero-wrapper">
+            <KpiCard
+              label="Current Balance"
+              value={currency(allTimeTotals.balance)}
+              sub="Income minus expenses, all time"
+              icon={allTimeTotals.balance >= 0 ? TrendingUp : TrendingDown}
+              tone={allTimeTotals.balance >= 0 ? "balance" : "expense"}
+              pulse={periodTotals.pulse}
+            />
+          </div>
+          <div className="kpi-details-grid">
+            <KpiCard
+              label={`Income · ${range.label}`}
+              value={currency(periodTotals.income)}
+              sub={<ComparisonSub diff={comparison.incomeDiff} pct={comparison.incomePct} prevLabel={range.prevLabel} />}
+              icon={ArrowUpRight}
+              tone="income"
+            />
+            <KpiCard
+              label={`Expense · ${range.label}`}
+              value={currency(periodTotals.expense)}
+              sub={<ComparisonSub diff={comparison.expenseDiff} pct={comparison.expensePct} prevLabel={range.prevLabel} invert />}
+              icon={ArrowDownRight}
+              tone="expense"
+            />
+            <KpiCard
+              label={`Savings · ${range.label}`}
+              value={currency(periodTotals.savings)}
+              sub={<ComparisonSub diff={comparison.savingsDiff} pct={comparison.savingsPct} prevLabel={range.prevLabel} />}
+              icon={PiggyBank}
+              tone={periodTotals.savings >= 0 ? "income" : "expense"}
+            />
+          </div>
+        </section>
+
+        {/* Secondary KPI Anchors */}
+        <section className="kpi-grid-secondary" aria-label="Secondary Financial summary">
           <KpiCard
             label="Today's Income"
             value={currency(allTimeTotals.todayIncome)}
@@ -1764,11 +1910,6 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
               <ChevronDown size={13} className="select-chevron" />
             </div>
 
-            <button className="btn btn-ghost sort-btn" onClick={toggleSort}>
-              <ArrowUpDown size={14} />
-              Date {sortDir === "asc" ? "↑" : "↓"}
-            </button>
-
             {hasFilters && (
               <button className="btn btn-ghost clear-btn" onClick={clearFilters}>
                 Clear
@@ -1799,58 +1940,153 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
               )}
             </div>
           ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Description</th>
-                    <th>Category</th>
-                    <th>Type</th>
-                    <th>Payment</th>
-                    <th className="th-amount">Amount</th>
-                    <th className="th-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleTransactions.map((t) => (
-                    <tr key={t.id}>
-                      <td className="cell-date">{fmtDate(t.date)}</td>
-                      <td className="cell-desc" title={t.notes || undefined}>
-                        {t.description}
-                        {t.notes && <span className="notes-dot" title={t.notes} aria-label="Has notes" />}
-                      </td>
-                      <td>
-                        <CategoryBadge category={t.category} />
-                      </td>
-                      <td>
-                        <span className={`type-chip ${t.type}`}>
-                          {t.type === "income" ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
-                          {t.type === "income" ? "Income" : "Expense"}
-                        </span>
-                      </td>
-                      <td className="cell-pay">{t.paymentMode}</td>
-                      <td className={`cell-amount ${t.type}`}>
-                        {t.type === "income" ? "+" : "−"}
-                        {currency(t.amount)}
-                      </td>
-                      <td className="cell-actions">
-                        <button className="icon-btn" onClick={() => openEditForm(t)} aria-label="Edit">
-                          <Pencil size={14} />
-                        </button>
-                        <button
-                          className="icon-btn danger"
-                          onClick={() => setDeleteTarget(t)}
-                          aria-label="Delete"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </td>
+            <>
+              {selectedIds.size > 0 && (
+                <div className="bulk-action-bar">
+                  <div className="bulk-info">
+                    <strong>{selectedIds.size}</strong> transaction{selectedIds.size === 1 ? "" : "s"} selected
+                  </div>
+                  <div className="bulk-buttons">
+                    <button className="btn btn-ghost" onClick={handleClearSelection}>
+                      Clear selection
+                    </button>
+                    <button className="btn btn-danger" onClick={() => setBulkConfirmOpen(true)}>
+                      <Trash2 size={14} /> Delete Selected
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="th-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={visibleTransactions.length > 0 && visibleTransactions.every((t) => selectedIds.has(t.id))}
+                          onChange={handleToggleSelectAll}
+                          aria-label="Select all transactions"
+                        />
+                      </th>
+                      <th onClick={() => handleSort("date")} className="sortable-th">
+                        <div className="th-content">
+                          Date {sortKey === "date" && (sortDir === "asc" ? "↑" : "↓")}
+                        </div>
+                      </th>
+                      <th onClick={() => handleSort("description")} className="sortable-th">
+                        <div className="th-content">
+                          Description {sortKey === "description" && (sortDir === "asc" ? "↑" : "↓")}
+                        </div>
+                      </th>
+                      <th onClick={() => handleSort("category")} className="sortable-th">
+                        <div className="th-content">
+                          Category {sortKey === "category" && (sortDir === "asc" ? "↑" : "↓")}
+                        </div>
+                      </th>
+                      <th>Type</th>
+                      <th onClick={() => handleSort("paymentMode")} className="sortable-th">
+                        <div className="th-content">
+                          Payment {sortKey === "paymentMode" && (sortDir === "asc" ? "↑" : "↓")}
+                        </div>
+                      </th>
+                      <th onClick={() => handleSort("amount")} className="sortable-th th-amount">
+                        <div className="th-content th-amount">
+                          Amount {sortKey === "amount" && (sortDir === "asc" ? "↑" : "↓")}
+                        </div>
+                      </th>
+                      <th className="th-actions">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {paginatedTransactions.map((t) => {
+                      const isSelected = selectedIds.has(t.id);
+                      return (
+                        <tr key={t.id} className={isSelected ? "row-selected" : ""}>
+                          <td className="cell-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleSelectRow(t.id)}
+                              aria-label={`Select transaction ${t.description}`}
+                            />
+                          </td>
+                          <td className="cell-date">{fmtDate(t.date)}</td>
+                          <td className="cell-desc" title={t.notes || undefined}>
+                            {t.description}
+                            {t.notes && <span className="notes-dot" title={t.notes} aria-label="Has notes" />}
+                          </td>
+                          <td>
+                            <CategoryBadge category={t.category} />
+                          </td>
+                          <td>
+                            <span className={`type-chip ${t.type}`}>
+                              {t.type === "income" ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+                              {t.type === "income" ? "Income" : "Expense"}
+                            </span>
+                          </td>
+                          <td className="cell-pay">{t.paymentMode}</td>
+                          <td className={`cell-amount ${t.type}`}>
+                            {t.type === "income" ? "+" : "−"}
+                            {currency(t.amount)}
+                          </td>
+                          <td className="cell-actions">
+                            <button className="icon-btn" onClick={() => openEditForm(t)} aria-label="Edit">
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              className="icon-btn danger"
+                              onClick={() => setDeleteTarget(t)}
+                              aria-label="Delete"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination controls */}
+              <div className="pagination-footer">
+                <div className="pagination-info">
+                  Showing <strong>{Math.min(visibleTransactions.length, (currentPage - 1) * pageSize + 1)}-{Math.min(visibleTransactions.length, currentPage * pageSize)}</strong> of <strong>{visibleTransactions.length}</strong> transaction{visibleTransactions.length === 1 ? "" : "s"}
+                </div>
+                <div className="pagination-actions">
+                  <div className="select-wrap small page-size-select">
+                    <select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}>
+                      <option value={10}>10 per page</option>
+                      <option value={25}>25 per page</option>
+                      <option value={50}>50 per page</option>
+                      <option value={100}>100 per page</option>
+                    </select>
+                    <ChevronDown size={13} className="select-chevron" />
+                  </div>
+                  <div className="page-nav">
+                    <button
+                      className="icon-btn page-nav-btn"
+                      disabled={currentPage === 1}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft size={16} />
+                    </button>
+                    <span className="page-nav-indicator">
+                      Page <strong>{currentPage}</strong> of {Math.ceil(visibleTransactions.length / pageSize) || 1}
+                    </span>
+                    <button
+                      className="icon-btn page-nav-btn"
+                      disabled={currentPage >= Math.ceil(visibleTransactions.length / pageSize)}
+                      onClick={() => setCurrentPage((p) => Math.min(Math.ceil(visibleTransactions.length / pageSize), p + 1))}
+                      aria-label="Next page"
+                    >
+                      <ChevronRight size={16} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </>
           )}
         </section>
 
@@ -1866,6 +2102,42 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}
       />
+      {bulkConfirmOpen && (
+        <div className="modal-overlay" onClick={() => setBulkConfirmOpen(false)}>
+          <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete Selected Transactions?</h3>
+            <p>
+              This will permanently delete <strong>{selectedIds.size}</strong> selected transaction{selectedIds.size === 1 ? "" : "s"}. This action cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setBulkConfirmOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={handleConfirmBulkDelete}>
+                Delete Selected
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteAllConfirmOpen && (
+        <div className="modal-overlay" onClick={() => setDeleteAllConfirmOpen(false)}>
+          <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Delete All Transactions?</h3>
+            <p>
+              This will permanently delete <strong>all {transactions.length}</strong> transaction{transactions.length === 1 ? "" : "s"} from your ledger database. This action is irreversible.
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setDeleteAllConfirmOpen(false)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={handleConfirmDeleteAll}>
+                Delete All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {logoutConfirmOpen && (
         <div className="modal-overlay" onClick={() => setLogoutConfirmOpen(false)}>
           <div className="modal-card confirm-card" onClick={(e) => e.stopPropagation()}>
@@ -1896,18 +2168,14 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
    it persists across the login screen and the dashboard alike. */
 export default function FinanceTracker() {
   const [theme, setTheme] = useState(loadTheme);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [session, setSession] = useState(null);
-
-  useEffect(() => {
-    setSession(authService.getSession());
-    setAuthChecked(true);
-  }, []);
+  const [session, setSession] = useState(() => authService.getSession());
 
   useEffect(() => {
     try {
       safeStorage.setItem(THEME_KEY, theme);
-    } catch (e) { }
+    } catch {
+      console.warn("Could not save theme to storage");
+    }
   }, [theme]);
 
   const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
@@ -1920,8 +2188,6 @@ export default function FinanceTracker() {
     authService.logout();
     setSession(null);
   }, []);
-
-  if (!authChecked) return null; // avoid a flash of the wrong screen while session is read
 
   if (!session) {
     const mode = hasCredentials() ? "login" : "setup";
@@ -1939,44 +2205,66 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
 
 .pft-root {
-  --radius: 16px;
-  --radius-sm: 10px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   min-height: 100vh;
-  transition: background 0.3s ease, color 0.3s ease;
+  transition: background 0.2s ease, color 0.2s ease;
+  -webkit-font-smoothing: antialiased;
 }
 
 .pft-root.theme-dark {
-  --bg: #0B0E14;
-  --bg-grad: radial-gradient(circle at 15% 0%, rgba(74,222,128,0.05), transparent 40%), radial-gradient(circle at 85% 10%, rgba(96,165,250,0.05), transparent 40%);
-  --card: #141925;
-  --card-border: #232A3A;
-  --card-hover: #1A2030;
-  --text: #E7EBF2;
-  --text-muted: #8893A6;
-  --text-faint: #5C6577;
-  --input-bg: #0F131C;
-  --table-row-hover: #161C29;
-  --divider: #1F2533;
-  --shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
-  background: var(--bg-grad), var(--bg);
+  --bg: #0F172A;
+  --card: #1E293B;
+  --card-border: #334155;
+  --card-hover: #334155;
+  --text: #F8FAFC;
+  --text-muted: #94A3B8;
+  --text-faint: #475569;
+  --input-bg: #0F172A;
+  --table-row-hover: #334155;
+  --divider: #334155;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.15);
+  
+  --primary: #2563EB;
+  --primary-hover: #3B82F6;
+  --income-color: #10B981;
+  --income-bg: rgba(16, 185, 129, 0.1);
+  --expense-color: #EF4444;
+  --expense-bg: rgba(239, 68, 68, 0.1);
+  --balance-color: #2563EB;
+  --balance-bg: rgba(37, 99, 235, 0.1);
+  
+  background: var(--bg);
   color: var(--text);
 }
 
 .pft-root.theme-light {
-  --bg: #F4F6F9;
-  --bg-grad: radial-gradient(circle at 15% 0%, rgba(74,222,128,0.07), transparent 40%), radial-gradient(circle at 85% 10%, rgba(96,165,250,0.07), transparent 40%);
+  --bg: #F8FAFC;
   --card: #FFFFFF;
-  --card-border: #E6E9EF;
-  --card-hover: #FAFBFD;
-  --text: #161A23;
-  --text-muted: #6B7280;
-  --text-faint: #9CA3AF;
-  --input-bg: #F7F8FA;
-  --table-row-hover: #F7F9FC;
-  --divider: #ECEEF2;
-  --shadow: 0 10px 30px -12px rgba(20,30,50,0.12);
-  background: var(--bg-grad), var(--bg);
+  --card-border: #E2E8F0;
+  --card-hover: #F8FAFC;
+  --text: #0F172A;
+  --text-muted: #64748B;
+  --text-faint: #94A3B8;
+  --input-bg: #F8FAFC;
+  --table-row-hover: #F8FAFC;
+  --divider: #E2E8F0;
+  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.02);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+  
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --income-color: #10B981;
+  --income-bg: rgba(16, 185, 129, 0.08);
+  --expense-color: #EF4444;
+  --expense-bg: rgba(239, 68, 68, 0.08);
+  --balance-color: #2563EB;
+  --balance-bg: rgba(37, 99, 235, 0.08);
+
+  background: var(--bg);
   color: var(--text);
 }
 
@@ -2047,37 +2335,42 @@ const CSS = `
   border-radius: var(--radius-sm);
   border: 1px solid transparent;
   cursor: pointer;
-  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: all 0.15s ease;
   white-space: nowrap;
 }
-.btn:active { transform: scale(0.97); }
+.btn:active { transform: scale(0.98); }
 
 .btn-primary {
-  background: linear-gradient(135deg, #4ADE80, #22C55E);
-  color: #06280F;
-  box-shadow: 0 6px 16px -6px rgba(34,197,94,0.5);
+  background: var(--primary);
+  color: #FFFFFF;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.1);
 }
-.btn-primary:hover { box-shadow: 0 8px 20px -6px rgba(34,197,94,0.65); }
+.btn-primary:hover {
+  background: var(--primary-hover);
+}
 .btn-primary.expense {
-  background: linear-gradient(135deg, #4ADE80, #22C55E);
+  background: var(--primary);
 }
 
 .btn-ghost {
   background: var(--card);
   color: var(--text-muted);
-  border-color: var(--card-border);
+  border: 1px solid var(--card-border);
 }
-.btn-ghost:hover { color: var(--text); border-color: var(--text-faint); background: var(--card-hover); }
+.btn-ghost:hover { color: var(--text); border-color: var(--text-faint); background: var(--table-row-hover); }
 
 .btn-danger {
-  background: linear-gradient(135deg, #F87171, #EF4444);
-  color: #2A0707;
+  background: var(--expense-color);
+  color: #FFFFFF;
+}
+.btn-danger:hover {
+  background: #DC2626;
 }
 
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 34px; height: 34px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   background: var(--card);
   border: 1px solid var(--card-border);
   color: var(--text-muted);
@@ -2086,78 +2379,123 @@ const CSS = `
   flex-shrink: 0;
 }
 .icon-btn:hover { color: var(--text); border-color: var(--text-faint); }
-.icon-btn.danger:hover { color: #F87171; border-color: #F87171; }
+.icon-btn.danger:hover { color: var(--expense-color); border-color: var(--expense-color); }
 
-/* ---------- KPI Grid ---------- */
-.kpi-grid {
+/* ---------- KPI Grid Layouts ---------- */
+.kpi-grid-primary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 14px;
+  grid-template-columns: 1.2fr 2.8fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.kpi-details-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.kpi-grid-secondary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
   margin-bottom: 24px;
+}
+
+@media (max-width: 1024px) {
+  .kpi-grid-primary {
+    grid-template-columns: 1fr;
+  }
+  .kpi-details-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+@media (max-width: 768px) {
+  .kpi-details-grid {
+    grid-template-columns: 1fr;
+  }
+  .kpi-grid-secondary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .kpi-grid-secondary {
+    grid-template-columns: 1fr;
+  }
 }
 
 .kpi-card {
   background: var(--card);
   border: 1px solid var(--card-border);
   border-radius: var(--radius);
-  padding: 18px 18px 16px;
+  padding: 20px;
   box-shadow: var(--shadow);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.15s ease, transform 0.15s ease;
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
-.kpi-card:hover { border-color: var(--text-faint); transform: translateY(-2px); }
+.kpi-card:hover { border-color: var(--card-border-glow); }
 
-.kpi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.kpi-label { font-size: 12.5px; color: var(--text-muted); font-weight: 600; letter-spacing: 0.01em; }
+.kpi-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.kpi-label { font-size: 13px; color: var(--text-muted); font-weight: 500; letter-spacing: 0.01em; }
 
 .kpi-icon {
   width: 28px; height: 28px;
-  border-radius: 8px;
+  border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
 }
-.kpi-icon.tone-income { background: rgba(74,222,128,0.14); color: #4ADE80; }
-.kpi-icon.tone-expense { background: rgba(248,113,113,0.14); color: #F87171; }
-.kpi-icon.tone-balance { background: rgba(96,165,250,0.14); color: #60A5FA; }
+.kpi-icon.tone-income { background: var(--income-bg); color: var(--income-color); }
+.kpi-icon.tone-expense { background: var(--expense-bg); color: var(--expense-color); }
+.kpi-icon.tone-balance { background: var(--balance-bg); color: var(--balance-color); }
 
 .kpi-value {
   font-family: 'Outfit', sans-serif;
   font-size: 26px;
   font-weight: 700;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  color: var(--text);
 }
 
-.kpi-sub { font-size: 12px; color: var(--text-faint); font-weight: 500; }
+.kpi-hero-wrapper .kpi-value {
+  font-size: 32px;
+}
+
+.kpi-sub { font-size: 12px; color: var(--text-muted); font-weight: 400; }
 
 .kpi-pulse-track {
   margin-top: 12px;
   height: 4px;
   border-radius: 4px;
-  background: rgba(248,113,113,0.25);
+  background: var(--expense-bg);
   overflow: hidden;
 }
 .kpi-pulse-fill {
   height: 100%;
-  background: linear-gradient(90deg, #4ADE80, #22C55E);
+  background: var(--primary);
   border-radius: 4px;
   transition: width 0.5s ease;
 }
 
 /* ---------- Period Filter Bar ---------- */
 .period-bar {
-  display: flex; flex-direction: column; gap: 12px;
-  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 16px;
 }
 
 .period-presets { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .period-chip {
   display: inline-flex; align-items: center; gap: 6px;
-  font-size: 12.5px; font-weight: 600;
+  font-size: 13px; font-weight: 500;
   padding: 8px 14px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--card-border);
   background: var(--card);
   color: var(--text-muted);
@@ -2167,11 +2505,15 @@ const CSS = `
 }
 .period-chip:hover { color: var(--text); border-color: var(--text-faint); }
 .period-chip.active {
-  background: rgba(74,222,128,0.14);
-  border-color: rgba(74,222,128,0.4);
-  color: #4ADE80;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #FFFFFF;
 }
-.custom-chip.active { background: rgba(96,165,250,0.14); border-color: rgba(96,165,250,0.4); color: #60A5FA; }
+.custom-chip.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #FFFFFF;
+}
 
 .period-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .period-picker .select-wrap.small select { background: var(--card); }
@@ -2189,10 +2531,11 @@ const CSS = `
 .comparison-sub {
   display: inline-flex; align-items: center; gap: 3px;
   flex-wrap: wrap;
-  font-size: 12px; font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
 }
-.comparison-sub.good { color: #4ADE80; }
-.comparison-sub.bad { color: #F87171; }
+.comparison-sub.good { color: var(--income-color); }
+.comparison-sub.bad { color: var(--expense-color); }
 .comparison-pct { font-weight: 500; opacity: 0.85; }
 .comparison-vs { color: var(--text-faint); font-weight: 500; }
 
@@ -2248,9 +2591,9 @@ const CSS = `
   border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
 }
-.insight-icon.tone-income { background: rgba(74,222,128,0.14); color: #4ADE80; }
-.insight-icon.tone-expense { background: rgba(248,113,113,0.14); color: #F87171; }
-.insight-icon.tone-balance { background: rgba(96,165,250,0.14); color: #60A5FA; }
+.insight-icon.tone-income { background: var(--income-bg); color: var(--income-color); }
+.insight-icon.tone-expense { background: var(--expense-bg); color: var(--expense-color); }
+.insight-icon.tone-balance { background: var(--balance-bg); color: var(--balance-color); }
 
 .insight-stat-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .insight-label { font-size: 11.5px; color: var(--text-faint); font-weight: 600; }
@@ -2287,8 +2630,8 @@ const CSS = `
 .yearly-table tfoot tr { border-top: 1px solid var(--card-border); font-weight: 700; }
 .yearly-table tfoot td { padding: 11px 14px; font-size: 13px; }
 .yearly-table .cell-amount { text-align: right; font-family: 'Outfit', sans-serif; font-variant-numeric: tabular-nums; font-weight: 600; }
-.yearly-table .cell-amount.income { color: #4ADE80; }
-.yearly-table .cell-amount.expense { color: #F87171; }
+.yearly-table .cell-amount.income { color: var(--income-color); }
+.yearly-table .cell-amount.expense { color: var(--expense-color); }
 
 /* ---------- Toolbar ---------- */
 .toolbar {
@@ -2336,6 +2679,57 @@ const CSS = `
 
 .sort-btn, .clear-btn { font-size: 12.5px; padding: 9px 13px; }
 
+/* ---------- Bulk Action Bar ---------- */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--input-bg);
+  border-bottom: 1px solid var(--divider);
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.bulk-info {
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+.bulk-info strong {
+  color: var(--text);
+}
+.bulk-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.row-selected {
+  background: rgba(99, 102, 241, 0.05) !important;
+}
+.row-selected:hover {
+  background: rgba(99, 102, 241, 0.08) !important;
+}
+.th-checkbox, .cell-checkbox {
+  width: 44px;
+  padding: 14px 0 14px 18px !important;
+  text-align: center;
+  vertical-align: middle;
+}
+.th-checkbox input[type="checkbox"], .cell-checkbox input[type="checkbox"] {
+  cursor: pointer;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+}
+
+.danger-btn {
+  color: var(--expense-color) !important;
+  border-color: rgba(244, 63, 94, 0.2) !important;
+}
+.danger-btn:hover {
+  background: rgba(244, 63, 94, 0.05) !important;
+  border-color: var(--expense-color) !important;
+}
+
 /* ---------- Table ---------- */
 .table-card {
   background: var(--card);
@@ -2363,6 +2757,76 @@ th {
 .th-amount { text-align: right; }
 .th-actions { text-align: right; }
 
+.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease;
+}
+.sortable-th:hover {
+  color: var(--text);
+}
+.th-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.th-content.th-amount {
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.pagination-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-top: 1px solid var(--divider);
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.pagination-info {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.pagination-info strong {
+  color: var(--text);
+}
+.pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.page-size-select select {
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+  font-size: 12.5px !important;
+}
+.page-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.page-nav-indicator {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.page-nav-indicator strong {
+  color: var(--text);
+}
+.page-nav-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+}
+.page-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+thead tr { border-bottom: 1px solid var(--divider); position: sticky; top: 0; background: var(--card); z-index: 5; }
+
 tbody tr { border-bottom: 1px solid var(--divider); transition: background 0.12s ease; }
 tbody tr:last-child { border-bottom: none; }
 tbody tr:hover { background: var(--table-row-hover); }
@@ -2375,13 +2839,13 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   display: inline-block;
   width: 5px; height: 5px;
   border-radius: 50%;
-  background: #60A5FA;
+  background: var(--primary);
   margin-left: 6px;
   vertical-align: middle;
 }
 .cell-amount { text-align: right; font-weight: 700; font-family: 'Outfit', sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.cell-amount.income { color: #4ADE80; }
-.cell-amount.expense { color: #F87171; }
+.cell-amount.income { color: var(--income-color); }
+.cell-amount.expense { color: var(--expense-color); }
 .cell-actions { text-align: right; white-space: nowrap; }
 .cell-actions .icon-btn { width: 30px; height: 30px; margin-left: 6px; }
 
@@ -2399,8 +2863,8 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   font-size: 12px; font-weight: 600;
   white-space: nowrap;
 }
-.type-chip.income { color: #4ADE80; }
-.type-chip.expense { color: #F87171; }
+.type-chip.income { color: var(--income-color); }
+.type-chip.expense { color: var(--expense-color); }
 
 /* ---------- Empty state ---------- */
 .empty-state {
