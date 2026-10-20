@@ -8,7 +8,7 @@ import {
   LogOut, Lock, Eye, EyeOff, ShieldCheck, AlertTriangle,
   Mail, CheckCircle2, Cloud, RefreshCw
 } from "lucide-react";
-import { supabase } from "./supabase";
+import { supabase, isSupabaseConfigured } from "./supabase";
 import {
   MONTH_NAMES,
   MONTH_SHORT,
@@ -42,16 +42,16 @@ import {
 ----------------------------------------------------------------*/
 
 const CATEGORY_STYLES = {
-  Salary: { bg: "rgba(74,222,128,0.14)", fg: "#4ADE80" },
-  Freelancing: { bg: "rgba(56,189,248,0.14)", fg: "#38BDF8" },
-  Business: { bg: "rgba(167,139,250,0.14)", fg: "#A78BFA" },
-  Food: { bg: "rgba(251,146,60,0.14)", fg: "#FB923C" },
-  Travel: { bg: "rgba(45,212,191,0.14)", fg: "#2DD4BF" },
-  Shopping: { bg: "rgba(244,114,182,0.14)", fg: "#F472B6" },
-  Medical: { bg: "rgba(248,113,113,0.14)", fg: "#F87171" },
-  Education: { bg: "rgba(96,165,250,0.14)", fg: "#60A5FA" },
-  Family: { bg: "rgba(250,204,21,0.14)", fg: "#FACC15" },
-  Other: { bg: "rgba(148,163,184,0.16)", fg: "#94A3B8" },
+  Salary: { bg: "rgba(21, 128, 61, 0.1)", fg: "#15803D" },
+  Freelancing: { bg: "rgba(13, 148, 136, 0.1)", fg: "#0F766E" },
+  Business: { bg: "rgba(79, 70, 229, 0.1)", fg: "#4338CA" },
+  Food: { bg: "rgba(194, 65, 12, 0.1)", fg: "#C2410C" },
+  Travel: { bg: "rgba(15, 118, 110, 0.1)", fg: "#0F766E" },
+  Shopping: { bg: "rgba(190, 24, 93, 0.1)", fg: "#BE185D" },
+  Medical: { bg: "rgba(185, 28, 28, 0.1)", fg: "#B91C1C" },
+  Education: { bg: "rgba(30, 64, 175, 0.1)", fg: "#1E40AF" },
+  Family: { bg: "rgba(180, 83, 9, 0.1)", fg: "#B45309" },
+  Other: { bg: "rgba(100, 116, 139, 0.12)", fg: "#475569" },
 };
 
 const currency = (n) =>
@@ -2377,7 +2377,7 @@ function Dashboard({ onLogout, currentUser, user, theme, onToggleTheme }) {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  style={{ padding: "4px 14px", fontSize: 12, background: "#EF4444", borderColor: "#EF4444" }}
+                  style={{ padding: "4px 14px", fontSize: 12, background: "var(--expense-color)", borderColor: "var(--expense-color)" }}
                   onClick={handleManualCleanupSampleRecords}
                 >
                   Clean Up {detectedSampleRecords.length} Sample Records
@@ -2386,10 +2386,10 @@ function Dashboard({ onLogout, currentUser, user, theme, onToggleTheme }) {
             </div>
 
             {showSampleDetails && (
-              <div style={{ marginTop: 12, overflowX: "auto", maxHeight: 280, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, background: "rgba(0,0,0,0.2)" }}>
+              <div style={{ marginTop: 12, overflowX: "auto", maxHeight: 280, border: "1px solid var(--card-border)", borderRadius: 8, background: "var(--input-bg)" }}>
                 <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse", textAlign: "left" }}>
                   <thead>
-                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)" }}>
+                    <tr style={{ borderBottom: "1px solid var(--divider)", background: "var(--card)" }}>
                       <th style={{ padding: "8px 10px" }}>#</th>
                       <th style={{ padding: "8px 10px" }}>Exact ID</th>
                       <th style={{ padding: "8px 10px" }}>Date</th>
@@ -2401,14 +2401,14 @@ function Dashboard({ onLogout, currentUser, user, theme, onToggleTheme }) {
                   </thead>
                   <tbody>
                     {detectedSampleRecords.map((r, i) => (
-                      <tr key={r.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                      <tr key={r.id} style={{ borderBottom: "1px solid var(--divider)" }}>
                         <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>{i + 1}</td>
-                        <td style={{ padding: "6px 10px", fontFamily: "monospace", fontSize: 11, color: "var(--accent, #818CF8)" }}>{r.id}</td>
+                        <td style={{ padding: "6px 10px", fontFamily: "monospace", fontSize: 11, color: "var(--primary)" }}>{r.id}</td>
                         <td style={{ padding: "6px 10px" }}>{r.date}</td>
                         <td style={{ padding: "6px 10px", fontWeight: 500 }}>{r.description}</td>
                         <td style={{ padding: "6px 10px" }}>{r.category}</td>
                         <td style={{ padding: "6px 10px", fontWeight: 600 }}>{currency(r.amount)}</td>
-                        <td style={{ padding: "6px 10px", color: "#F59E0B" }}>Sample Record</td>
+                        <td style={{ padding: "6px 10px", color: "var(--amber-color, #D97706)" }}>Sample Record</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2425,9 +2425,9 @@ function Dashboard({ onLogout, currentUser, user, theme, onToggleTheme }) {
           >
             <div className="import-banner-text" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               {typeof migrationAlert === "object" && migrationAlert.type === "error" ? (
-                <AlertTriangle size={16} style={{ color: "#F59E0B", flexShrink: 0 }} />
+                <AlertTriangle size={16} style={{ color: "var(--amber-color, #D97706)", flexShrink: 0 }} />
               ) : (
-                <CheckCircle2 size={16} style={{ color: "#4ADE80", flexShrink: 0 }} />
+                <CheckCircle2 size={16} style={{ color: "var(--income-color)", flexShrink: 0 }} />
               )}
               <span>{typeof migrationAlert === "object" ? migrationAlert.text : migrationAlert}</span>
               {typeof migrationAlert === "object" && migrationAlert.type === "error" && (
@@ -3115,6 +3115,36 @@ export default function FinanceTracker() {
     setSession(null);
   }, [session]);
 
+  if (!isSupabaseConfigured) {
+    return (
+      <div className={`pft-root theme-${theme} auth-shell`} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: "20px" }}>
+        <style>{CSS}</style>
+        <div className="auth-card" style={{ maxWidth: 520, width: "100%", padding: "32px 28px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+            <div className="brand-mark">
+              <Wallet size={20} />
+            </div>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, fontFamily: "'Outfit', sans-serif" }}>Finance Tracker Setup</h2>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Supabase Environment Variables Required</span>
+            </div>
+          </div>
+          <p style={{ fontSize: 13.5, color: "var(--text-muted)", lineHeight: 1.5, margin: "0 0 16px" }}>
+            The application loaded successfully, but requires Supabase credentials to authenticate and store records. On Netlify or Vercel, please configure these in your site settings.
+          </p>
+          <div style={{ background: "var(--input-bg)", border: "1px solid var(--card-border)", borderRadius: "var(--radius-sm)", padding: "14px 16px", marginBottom: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>Required in Netlify (Site configuration &gt; Environment variables):</div>
+            <code style={{ display: "block", fontSize: 12, fontFamily: "monospace", color: "var(--primary)", marginBottom: 6 }}>VITE_SUPABASE_URL=https://your-project.supabase.co</code>
+            <code style={{ display: "block", fontSize: 12, fontFamily: "monospace", color: "var(--primary)" }}>VITE_SUPABASE_ANON_KEY=your-anon-key</code>
+          </div>
+          <p style={{ fontSize: 12, color: "var(--text-faint)", margin: 0 }}>
+            After adding these variables, trigger a new deploy or clear cache and deploy site.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className={`pft-root theme-${theme} auth-shell`} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
@@ -3160,54 +3190,62 @@ const CSS = `
 }
 
 .pft-root.theme-dark {
-  --bg: #0F172A;
-  --card: #1E293B;
-  --card-border: #334155;
-  --card-hover: #334155;
-  --text: #F8FAFC;
+  --bg: #0F141C;
+  --card: #171E29;
+  --card-border: #242E3D;
+  --card-hover: #1D2634;
+  --text: #F1F5F9;
   --text-muted: #94A3B8;
-  --text-faint: #475569;
-  --input-bg: #0F172A;
-  --table-row-hover: #334155;
-  --divider: #334155;
-  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.15);
+  --text-faint: #64748B;
+  --input-bg: #121822;
+  --table-row-hover: #1C2430;
+  --divider: #222B38;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.25), 0 2px 4px -1px rgba(0, 0, 0, 0.15);
+  --shadow-lg: 0 12px 24px -4px rgba(0, 0, 0, 0.35);
   
-  --primary: #2563EB;
-  --primary-hover: #3B82F6;
-  --income-color: #10B981;
-  --income-bg: rgba(16, 185, 129, 0.1);
-  --expense-color: #EF4444;
-  --expense-bg: rgba(239, 68, 68, 0.1);
-  --balance-color: #2563EB;
-  --balance-bg: rgba(37, 99, 235, 0.1);
+  --primary: #2D6A4F;
+  --primary-hover: #245841;
+  --income-color: #34D399;
+  --income-bg: rgba(52, 211, 153, 0.12);
+  --expense-color: #FB7185;
+  --expense-bg: rgba(251, 113, 133, 0.12);
+  --balance-color: #34D399;
+  --balance-bg: rgba(52, 211, 153, 0.1);
+  --amber-color: #FBBF24;
+  --amber-bg: rgba(251, 191, 36, 0.1);
+  --amber-border: rgba(251, 191, 36, 0.25);
+  --input-focus-ring: rgba(52, 211, 153, 0.2);
   
   background: var(--bg);
   color: var(--text);
 }
 
 .pft-root.theme-light {
-  --bg: #F8FAFC;
+  --bg: #FBFBFA;
   --card: #FFFFFF;
-  --card-border: #E2E8F0;
-  --card-hover: #F8FAFC;
-  --text: #0F172A;
-  --text-muted: #64748B;
-  --text-faint: #94A3B8;
-  --input-bg: #F8FAFC;
-  --table-row-hover: #F8FAFC;
-  --divider: #E2E8F0;
-  --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.02);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+  --card-border: #E8E7E3;
+  --card-hover: #F6F5F1;
+  --text: #171E26;
+  --text-muted: #5A6677;
+  --text-faint: #8E99A8;
+  --input-bg: #F8F8F5;
+  --table-row-hover: #F6F5F2;
+  --divider: #EBEAE5;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  --shadow-lg: 0 6px 16px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
   
-  --primary: #2563EB;
-  --primary-hover: #1D4ED8;
-  --income-color: #10B981;
-  --income-bg: rgba(16, 185, 129, 0.08);
-  --expense-color: #EF4444;
-  --expense-bg: rgba(239, 68, 68, 0.08);
-  --balance-color: #2563EB;
-  --balance-bg: rgba(37, 99, 235, 0.08);
+  --primary: #1E4D3B;
+  --primary-hover: #163B2D;
+  --income-color: #15803D;
+  --income-bg: rgba(21, 128, 61, 0.08);
+  --expense-color: #BE123C;
+  --expense-bg: rgba(190, 18, 60, 0.08);
+  --balance-color: #1E4D3B;
+  --balance-bg: rgba(30, 77, 59, 0.08);
+  --amber-color: #B45309;
+  --amber-bg: rgba(180, 83, 9, 0.08);
+  --amber-border: rgba(180, 83, 9, 0.25);
+  --input-focus-ring: rgba(30, 77, 59, 0.15);
 
   background: var(--bg);
   color: var(--text);
@@ -3235,10 +3273,11 @@ const CSS = `
 
 .brand-mark {
   width: 38px; height: 38px;
-  border-radius: 11px;
+  border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(135deg, #4ADE80, #22C55E);
-  color: #06280F;
+  background: var(--primary);
+  color: #FFFFFF;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.12);
   flex-shrink: 0;
 }
 
@@ -3260,8 +3299,8 @@ const CSS = `
   margin-bottom: 18px;
   font-size: 13px;
 }
-.import-banner.ok { border-color: rgba(74,222,128,0.4); }
-.import-banner.warn { border-color: rgba(250,204,21,0.4); }
+.import-banner.ok { border-color: rgba(21, 128, 61, 0.35); }
+.import-banner.warn { border-color: var(--amber-border); }
 .import-banner-text { color: var(--text); line-height: 1.5; }
 .import-error-list {
   margin: 6px 0 0;
@@ -3288,7 +3327,7 @@ const CSS = `
 .btn-primary {
   background: var(--primary);
   color: #FFFFFF;
-  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.1);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
 }
 .btn-primary:hover {
   background: var(--primary-hover);
@@ -3509,7 +3548,7 @@ const CSS = `
   font-size: 14px; font-weight: 700;
   font-family: 'Outfit', sans-serif;
 }
-.insights-toggle-label svg { color: #4ADE80; }
+.insights-toggle-label svg { color: var(--primary); }
 
 .chevron-rotate { transition: transform 0.2s ease; color: var(--text-faint); }
 .chevron-rotate.open { transform: rotate(180deg); }
@@ -3648,10 +3687,11 @@ const CSS = `
   gap: 8px;
 }
 .row-selected {
-  background: rgba(99, 102, 241, 0.05) !important;
+  background: var(--balance-bg) !important;
 }
 .row-selected:hover {
-  background: rgba(99, 102, 241, 0.08) !important;
+  background: var(--balance-bg) !important;
+  filter: brightness(0.97);
 }
 .th-checkbox, .cell-checkbox {
   width: 44px;
@@ -3668,10 +3708,10 @@ const CSS = `
 
 .danger-btn {
   color: var(--expense-color) !important;
-  border-color: rgba(244, 63, 94, 0.2) !important;
+  border-color: rgba(190, 18, 60, 0.25) !important;
 }
 .danger-btn:hover {
-  background: rgba(244, 63, 94, 0.05) !important;
+  background: var(--expense-bg) !important;
   border-color: var(--expense-color) !important;
 }
 
@@ -3908,9 +3948,9 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  background: rgba(74,222,128,0.1);
-  border: 1px solid rgba(74,222,128,0.3);
-  color: #4ADE80;
+  background: var(--income-bg);
+  border: 1px solid var(--income-color);
+  color: var(--income-color);
   font-size: 12.5px;
   font-weight: 500;
   padding: 10px 12px;
@@ -3929,9 +3969,9 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   border: 1px solid var(--card-border);
   background: var(--card);
 }
-.sync-pill.synced { color: #4ADE80; border-color: rgba(74,222,128,0.35); }
-.sync-pill.syncing { color: #60A5FA; border-color: rgba(96,165,250,0.35); }
-.sync-pill.error { color: #F87171; border-color: rgba(248,113,113,0.35); }
+.sync-pill.synced { color: var(--income-color); border-color: rgba(21, 128, 61, 0.35); }
+.sync-pill.syncing { color: var(--primary); border-color: rgba(30, 77, 59, 0.35); }
+.sync-pill.error { color: var(--expense-color); border-color: rgba(190, 18, 60, 0.35); }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }
 
@@ -3943,9 +3983,12 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   border: 1px solid var(--card-border);
   border-radius: 10px;
   padding: 0 12px;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.input-with-icon:focus-within { border-color: #4ADE80; }
+.input-with-icon:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
+}
 .input-with-icon svg:first-child { color: var(--text-faint); flex-shrink: 0; }
 .input-with-icon input {
   flex: 1;
@@ -3967,9 +4010,9 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
 
 .auth-error {
   display: flex; align-items: flex-start; gap: 7px;
-  background: rgba(248,113,113,0.1);
-  border: 1px solid rgba(248,113,113,0.3);
-  color: #F87171;
+  background: var(--expense-bg);
+  border: 1px solid rgba(190, 18, 60, 0.3);
+  color: var(--expense-color);
   font-size: 12.5px;
   font-weight: 500;
   padding: 10px 12px;
@@ -3988,9 +4031,9 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   color: var(--text-faint);
   text-align: center;
 }
-.auth-footnote svg { flex-shrink: 0; color: #4ADE80; }
+.auth-footnote svg { flex-shrink: 0; color: var(--primary); }
 
-.logout-btn:hover { color: #F87171; border-color: #F87171; }
+.logout-btn:hover { color: var(--expense-color); border-color: var(--expense-color); }
 
 /* ---------- Modal ---------- */
 .modal-overlay {
@@ -4042,8 +4085,8 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   cursor: pointer;
   transition: all 0.15s ease;
 }
-.type-btn.active.income { background: rgba(74,222,128,0.15); color: #4ADE80; }
-.type-btn.active.expense { background: rgba(248,113,113,0.15); color: #F87171; }
+.type-btn.active.income { background: var(--income-bg); color: var(--income-color); border: 1px solid var(--income-color); }
+.type-btn.active.expense { background: var(--expense-bg); color: var(--expense-color); border: 1px solid var(--expense-color); }
 
 .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
@@ -4058,7 +4101,7 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   color: var(--text);
   outline: none;
   font-family: inherit;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .form-field textarea {
   background: var(--input-bg);
@@ -4071,15 +4114,21 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   font-family: inherit;
   resize: vertical;
   min-height: 44px;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-.form-field textarea:focus { border-color: #4ADE80; }
+.form-field textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
+}
 .label-optional { color: var(--text-faint); font-weight: 500; text-transform: none; }
 .theme-dark .form-field input { color-scheme: dark; }
 .theme-light .form-field input { color-scheme: light; }
-.form-field input:focus { border-color: #4ADE80; }
-.form-field input.err { border-color: #F87171; }
-.field-err { font-size: 11.5px; color: #F87171; font-weight: 500; }
+.form-field input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
+}
+.form-field input.err { border-color: var(--expense-color); }
+.field-err { font-size: 11.5px; color: var(--expense-color); font-weight: 500; }
 
 .form-field .select-wrap select { width: 100%; padding: 10px 30px 10px 12px; border-radius: 10px; background: var(--input-bg); }
 
@@ -4148,11 +4197,12 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   display: flex;
   flex-direction: column;
   gap: 12px;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .batch-entry-card:focus-within {
-  border-color: rgba(37, 99, 235, 0.4);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--input-focus-ring);
 }
 
 .batch-entry-header {
@@ -4178,16 +4228,17 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   padding: 4px 8px;
   font-size: 11.5px;
   font-weight: 600;
-  color: #EF4444;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: var(--expense-color);
+  background: var(--expense-bg);
+  border: 1px solid rgba(190, 18, 60, 0.2);
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .batch-remove-btn:hover {
-  background: rgba(239, 68, 68, 0.18);
+  background: var(--expense-bg);
+  filter: brightness(0.95);
 }
 
 .add-another-btn {
@@ -4209,7 +4260,7 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
 
 .add-another-btn:hover:not(:disabled) {
   border-color: var(--primary);
-  background: rgba(37, 99, 235, 0.06);
+  background: var(--balance-bg);
 }
 
 .date-input-wrap {
@@ -4247,8 +4298,9 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   border-radius: 9999px;
   font-size: 11px;
   font-weight: 700;
-  background: rgba(37, 99, 235, 0.12);
-  color: #38BDF8;
+  background: var(--amber-bg);
+  color: var(--amber-color);
+  border: 1px solid var(--amber-border);
 }
 
 .batch-summary-strip {
@@ -4259,7 +4311,8 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   font-size: 12.5px;
   color: var(--text-muted);
   padding: 8px 12px;
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--input-bg);
+  border: 1px solid var(--card-border);
   border-radius: 8px;
 }
 
