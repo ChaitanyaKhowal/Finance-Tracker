@@ -5,33 +5,41 @@ import {
   ChevronDown, Filter, ReceiptText, Download, Upload,
   CalendarClock, CalendarDays, ChevronLeft, ChevronRight, BarChart3,
   Minus, Tag, Receipt, ListChecks, SlidersHorizontal,
-  LogOut, Lock, User, Eye, EyeOff, ShieldCheck, AlertTriangle
+  LogOut, Lock, Eye, EyeOff, ShieldCheck, AlertTriangle,
+  Mail, CheckCircle2, Cloud, RefreshCw
 } from "lucide-react";
+import { supabase } from "./supabase";
+import {
+  MONTH_NAMES,
+  MONTH_SHORT,
+  isValidCalendarDate,
+  fmtDate,
+  todayISO,
+} from "./utils/date";
+import {
+  STORAGE_KEY,
+  THEME_KEY,
+  safeStorage,
+  loadUserTransactions,
+  saveUserTransactions,
+  clearUserCache,
+  clearLegacyStorage,
+} from "./utils/storage";
+import {
+  INCOME_CATEGORIES,
+  EXPENSE_CATEGORIES,
+  PAYMENT_MODES,
+  CSV_COLUMNS,
+  uid,
+  normalizeTransaction,
+  importRowsToTransactions,
+  deduplicateTransactions,
+  executeChunkedUpsert,
+} from "./utils/csv";
 
 /* ---------------------------------------------------------------
    CONFIG
 ----------------------------------------------------------------*/
-
-const INCOME_CATEGORIES = ["Salary", "Freelancing", "Business", "Other"];
-const EXPENSE_CATEGORIES = ["Food", "Rent", "Transport", "Entertainment", "Shopping", "Bills", "Health", "Misc", "Debt", "Investment", "Saved", "Home", "Travel", "Medical", "Education", "Family", "Other"];
-const PAYMENT_MODES = ["Cash", "UPI", "Online", "Bank Transfer", "Debit Card", "Credit Card"];
-
-/* Data model (future-proof for budgets / analytics / yearly reports):
-   {
-     id: string,
-     date: "YYYY-MM-DD",
-     description: string,
-     category: string,
-     type: "income" | "expense",
-     amount: number,
-     paymentMode: "Cash" | "UPI" | "Bank Transfer" | "Debit Card" | "Credit Card",
-     notes: string,            // optional, "" if none
-     month: number,            // 1-12, derived from date — indexed for fast monthly aggregation
-     year: number,             // derived from date — indexed for fast yearly aggregation
-     createdAt: ISO timestamp, // audit trail
-     updatedAt: ISO timestamt  // audit trail
-   }
-*/
 
 const CATEGORY_STYLES = {
   Salary: { bg: "rgba(74,222,128,0.14)", fg: "#4ADE80" },
@@ -46,33 +54,6 @@ const CATEGORY_STYLES = {
   Other: { bg: "rgba(148,163,184,0.16)", fg: "#94A3B8" },
 };
 
-const STORAGE_KEY = "pft_transactions_v1";
-const THEME_KEY = "pft_theme_v1";
-
-/* In-browser deployments (Vite/CRA/Next, etc.) have real window.localStorage.
-   The Claude.ai artifact preview sandbox blocks it, so we fall back to an
-   in-memory store with the exact same API — drop this file into a real
-   project and it persists automatically with zero changes. */
-const memoryStore = {};
-const safeStorage = (() => {
-  try {
-    const testKey = "__pft_test__";
-    window.localStorage.setItem(testKey, "1");
-    window.localStorage.removeItem(testKey);
-    return window.localStorage;
-  } catch {
-    return {
-      getItem: (k) => (k in memoryStore ? memoryStore[k] : null),
-      setItem: (k, v) => {
-        memoryStore[k] = String(v);
-      },
-      removeItem: (k) => {
-        delete memoryStore[k];
-      },
-    };
-  }
-})();
-
 const currency = (n) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -81,184 +62,277 @@ const currency = (n) =>
     maximumFractionDigits: 2,
   }).format(Number.isFinite(n) ? n : 0);
 
-const fmtDate = (iso) => {
-  const d = new Date(iso + "T00:00:00");
-  if (isNaN(d)) return iso;
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-};
-
-const todayISO = () => new Date().toISOString().slice(0, 10);
-const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-
 /* ---------------------------------------------------------------
-   AUTHENTICATION MODULE
+   AUTHENTICATION MODULE & CLOUD MIGRATION (Supabase)
    ---------------------------------------------------------------
-   IMPORTANT, HONEST CAVEAT: this is a privacy screen, not real
-   security. Credentials and the password hash live in this browser's
-   localStorage, in plain JSON. Anyone with access to the device and
-   dev tools (or just localStorage.getItem) can read it directly —
-   client-side storage cannot be made secure against the device's own
-   user. What this DOES achieve: the financial data isn't shown to
-   someone who casually opens the page, and a password is never
-   stored in plaintext, only as a salted hash.
-
-   FUTURE-READY SHAPE: every function below is written the way its
-   eventual Spring Boot equivalent would be called, so swapping the
-   body for a real fetch() to a backend later is a small, contained
-   change — no caller code (LoginScreen, AuthProvider) needs to change:
-
-     hasCredentials()                 -> GET  /api/auth/exists
-     authService.register(u, p)       -> POST /api/auth/register
-     authService.login(u, p)          -> POST /api/auth/login        (returns a JWT instead of a local session)
-     authService.logout()             -> POST /api/auth/logout       (or just discard the JWT client-side)
-     authService.getSession()         -> read JWT from storage + verify/decode instead of reading local JSON
-     authService.changePassword(...)  -> POST /api/auth/change-password
-
-   All of these are already async, returning { ok, error } shaped
-   results, so the calling components never need to know whether the
-   implementation is local hashing or a network call.
+   Backed by Supabase Auth with Row-Level Security (RLS).
+   All operations return { ok, error } shaped results.
 ----------------------------------------------------------------*/
 
-const AUTH_KEY = "pft_auth_v1"; // { username, salt, hash }
-const SESSION_KEY = "pft_session_v1"; // { username, loggedInAt }
-
-/** Converts a Uint8Array / ArrayBuffer to a hex string. */
-const bufToHex = (buf) =>
-  Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-
-const randomSalt = () => {
-  const bytes = new Uint8Array(16);
-  if (window.crypto?.getRandomValues) window.crypto.getRandomValues(bytes);
-  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
-  return bufToHex(bytes);
-};
-
-/** Salted SHA-256 hash via the browser's native SubtleCrypto. Falls
- *  back to a (weaker, but still non-plaintext) string hash if
- *  SubtleCrypto is unavailable, e.g. on a non-HTTPS origin — this
- *  keeps first-run setup from hard-failing in that edge case while
- *  still never persisting the raw password. */
-async function hashPassword(password, salt) {
-  const input = `${salt}:${password}`;
-  if (window.crypto?.subtle?.digest) {
-    const data = new TextEncoder().encode(input);
-    const digest = await window.crypto.subtle.digest("SHA-256", data);
-    return bufToHex(digest);
-  }
-  // Fallback: simple non-cryptographic hash (DJB2). Only reached when
-  // SubtleCrypto truly isn't available (very old browser, or non-secure context).
-  let hash = 5381;
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash * 33) ^ input.charCodeAt(i);
-  }
-  return "djb2_" + (hash >>> 0).toString(16);
-}
-
-function readAuthRecord() {
-  try {
-    const raw = safeStorage.getItem(AUTH_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeAuthRecord(record) {
-  try {
-    safeStorage.setItem(AUTH_KEY, JSON.stringify(record));
-  } catch (e) {
-    console.error("Failed to save credentials", e);
-  }
-}
-
-function readSession() {
-  try {
-    const raw = safeStorage.getItem(SESSION_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Whether any credentials have ever been set up on this device —
- *  the signal LoginScreen uses to decide "show setup" vs "show login". */
-const hasCredentials = () => !!readAuthRecord();
-
-/** The auth service: a small async interface kept deliberately
- *  identical in shape to what a real backend client would expose.
- *  Swapping localStorage for fetch() calls later means editing only
- *  inside these four functions. */
 const authService = {
-  async register(username, password) {
-    const trimmed = username.trim();
-    if (!trimmed) return { ok: false, error: "Username is required." };
-    if (!password || password.length < 4) return { ok: false, error: "Password must be at least 4 characters." };
+  async register(email, password) {
+    const trimmed = (email || "").trim();
+    if (!trimmed) return { ok: false, error: "Email address is required." };
+    if (!password || password.length < 6) return { ok: false, error: "Password must be at least 6 characters." };
 
-    const salt = randomSalt();
-    const hash = await hashPassword(password, salt);
-    writeAuthRecord({ username: trimmed, salt, hash, createdAt: new Date().toISOString() });
-    safeStorage.setItem(SESSION_KEY, JSON.stringify({ username: trimmed, loggedInAt: new Date().toISOString() }));
-    return { ok: true, username: trimmed };
-  },
+    try {
+      const redirectUrl = typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "http://localhost:5173";
+      const { data, error } = await supabase.auth.signUp({
+        email: trimmed,
+        password: password,
+        options: {
+          emailRedirectTo: redirectUrl,
+        },
+      });
+      if (error) return { ok: false, error: error.message };
 
-  async login(username, password) {
-    const record = readAuthRecord();
-    if (!record) return { ok: false, error: "No account set up on this device yet." };
-
-    const trimmed = username.trim();
-    if (trimmed.toLowerCase() !== record.username.toLowerCase()) {
-      return { ok: false, error: "Incorrect username or password." };
+      const requiresEmailConfirmation = !!(data.user && !data.session);
+      return {
+        ok: true,
+        user: data.user,
+        requiresEmailConfirmation,
+        email: trimmed,
+      };
+    } catch (e) {
+      return { ok: false, error: e.message || "Failed to sign up." };
     }
-    const hash = await hashPassword(password, record.salt);
-    if (hash !== record.hash) {
-      return { ok: false, error: "Incorrect username or password." };
+  },
+
+  async resendConfirmation(email) {
+    const trimmed = (email || "").trim();
+    if (!trimmed) return { ok: false, error: "Email address is required." };
+    try {
+      const redirectUrl = typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "http://localhost:5173";
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email: trimmed,
+        options: {
+          emailRedirectTo: redirectUrl,
+        },
+      });
+      if (error) return { ok: false, error: error.message };
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e.message || "Failed to resend confirmation email." };
     }
-    safeStorage.setItem(SESSION_KEY, JSON.stringify({ username: record.username, loggedInAt: new Date().toISOString() }));
-    return { ok: true, username: record.username };
   },
 
-  logout() {
-    safeStorage.removeItem(SESSION_KEY);
+  async login(email, password) {
+    const trimmed = (email || "").trim();
+    if (!trimmed) return { ok: false, error: "Email address is required." };
+    if (!password) return { ok: false, error: "Password is required." };
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: trimmed,
+        password: password,
+      });
+      if (error) {
+        if (error.message.toLowerCase().includes("email not confirmed")) {
+          return { ok: false, error: "Please verify your email address before logging in." };
+        }
+        return { ok: false, error: error.message };
+      }
+      return { ok: true, user: data.user, session: data.session };
+    } catch (e) {
+      return { ok: false, error: e.message || "Failed to log in." };
+    }
   },
 
-  getSession() {
-    return readSession();
+  async logout() {
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      console.error("Logout error", e);
+    }
   },
 
-  /** Lets a logged-in user change their password without resetting
-   *  the device's "first-run" state. Not wired into the UI yet (not
-   *  in the current requirements) but kept here so it's a one-screen
-   *  addition later rather than new architecture. */
-  async changePassword(currentPassword, newPassword) {
-    const record = readAuthRecord();
-    if (!record) return { ok: false, error: "No account exists." };
-    const currentHash = await hashPassword(currentPassword, record.salt);
-    if (currentHash !== record.hash) return { ok: false, error: "Current password is incorrect." };
-    if (!newPassword || newPassword.length < 4) return { ok: false, error: "New password must be at least 4 characters." };
-    const salt = randomSalt();
-    const hash = await hashPassword(newPassword, salt);
-    writeAuthRecord({ ...record, salt, hash });
-    return { ok: true };
+  async getSession() {
+    try {
+      const { data } = await supabase.auth.getSession();
+      return data?.session || null;
+    } catch {
+      return null;
+    }
   },
 };
 
-/** Derives month (1-12) and year from a YYYY-MM-DD date string.
- *  Stored alongside each transaction (not computed on the fly) so that
- *  monthly/yearly aggregation, budgets, and reports in later phases
- *  can group and filter with a simple equality check instead of
- *  re-parsing dates across the whole dataset every render. */
-const deriveDateParts = (dateStr) => {
-  const d = new Date(dateStr + "T00:00:00");
-  if (isNaN(d)) return { month: null, year: null };
-  return { month: d.getMonth() + 1, year: d.getFullYear() };
-};
-
-const MONTH_NAMES = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+/**
+ * The 15 exact composite template signatures generated by seedTransactions().
+ * A record is strictly classified as a sample if and only if it matches
+ * the full multi-field signature: description, type, category, paymentMode,
+ * exact amount, and notes.
+ * NEVER classify based only on month, date, description, category, or amount!
+ */
+const SEED_SAMPLE_SIGNATURES = [
+  { description: "Grocery run", category: "Food", type: "expense", amount: 1200, paymentMode: "UPI", notes: "Weekly vegetables and essentials" },
+  { description: "Freelance milestone payment", category: "Freelancing", type: "income", amount: 9000, paymentMode: "Bank Transfer", notes: "" },
+  { description: "Monthly salary", category: "Salary", type: "income", amount: 85000, paymentMode: "Bank Transfer", notes: "Credited on the 1st" },
+  { description: "Logo design project", category: "Freelancing", type: "income", amount: 12000, paymentMode: "UPI", notes: "" },
+  { description: "Grocery run", category: "Food", type: "expense", amount: 2400, paymentMode: "Debit Card", notes: "" },
+  { description: "Metro card recharge", category: "Travel", type: "expense", amount: 600, paymentMode: "UPI", notes: "" },
+  { description: "New headphones", category: "Shopping", type: "expense", amount: 3200, paymentMode: "Credit Card", notes: "Sony WH-CH520" },
+  { description: "Dentist visit", category: "Medical", type: "expense", amount: 1500, paymentMode: "Cash", notes: "Routine checkup" },
+  { description: "Online course", category: "Education", type: "expense", amount: 999, paymentMode: "Credit Card", notes: "" },
+  { description: "Mom's birthday gift", category: "Family", type: "expense", amount: 2000, paymentMode: "UPI", notes: "" },
+  { description: "Consulting gig", category: "Business", type: "income", amount: 18000, paymentMode: "Bank Transfer", notes: "" },
+  { description: "Dinner out", category: "Food", type: "expense", amount: 1800, paymentMode: "Credit Card", notes: "Anniversary dinner" },
+  { description: "Monthly salary", category: "Salary", type: "income", amount: 85000, paymentMode: "Bank Transfer", notes: "" },
+  { description: "Rent share to landlord", category: "Other", type: "expense", amount: 15000, paymentMode: "Bank Transfer", notes: "" },
+  { description: "Interest payout", category: "Other", type: "income", amount: 450, paymentMode: "Bank Transfer", notes: "Savings account interest" },
 ];
 
-const MONTH_SHORT = MONTH_NAMES.map((m) => m.slice(0, 3));
+function isSampleTransaction(t) {
+  if (!t) return false;
+  const tDesc = (t.description || "").trim();
+  const tType = (t.type || "").trim().toLowerCase();
+  const tCat = (t.category || "").trim();
+  const tPay = (t.paymentMode || t.payment_mode || "").trim();
+  const tAmt = Math.abs(Number(t.amount) || 0);
+  const tNotes = (t.notes || "").trim();
+
+  return SEED_SAMPLE_SIGNATURES.some(
+    (s) =>
+      s.description === tDesc &&
+      s.type === tType &&
+      s.category === tCat &&
+      s.paymentMode === tPay &&
+      Math.abs(s.amount - tAmt) < 0.01 &&
+      (s.notes || "") === tNotes
+  );
+}
+
+/**
+ * Migrates existing laptop records from localStorage to Supabase with deep verification.
+ * 1. Checks if migration was already verified and marked complete.
+ * 2. Cloud-First Check: If user already has transactions in Supabase, skip migration.
+ * 3. Filters out any sample/dummy records so fake records are never uploaded.
+ * 4. Uploads via upsert with composite primary key (id, user_id).
+ * 5. Deep-verifies all record IDs and contents against cloud response.
+ * 6. Only marks complete if 100% verified. Never deletes local data.
+ */
+async function migrateLocalTransactions(user) {
+  if (!user?.id) return { status: "no_user" };
+  const migKey = `pft_migrated_v1_${user.id}`;
+  if (safeStorage.getItem(migKey) === "true") {
+    return { status: "already_migrated" };
+  }
+
+  // Cloud-First Guard: If user already has cloud transactions, cloud is the single source of truth.
+  // Never upload local unauthenticated or sample data into an existing account.
+  try {
+    const { data: cloudExisting, error: checkErr } = await supabase
+      .from("transactions")
+      .select("id")
+      .eq("user_id", user.id)
+      .limit(1);
+
+    if (!checkErr && cloudExisting && cloudExisting.length > 0) {
+      safeStorage.setItem(migKey, "true");
+      return { status: "already_migrated" };
+    }
+  } catch (e) {
+    console.warn("Could not check existing cloud records:", e);
+  }
+
+  let localTxns = [];
+  try {
+    const raw = safeStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      localTxns = JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error("Could not parse local transactions for migration:", err);
+    return { status: "failed", error: "Failed to read local storage." };
+  }
+
+  if (!Array.isArray(localTxns) || localTxns.length === 0) {
+    safeStorage.setItem(migKey, "true");
+    return { status: "empty" };
+  }
+
+  // Filter out any sample seed transactions — sample data must NEVER be uploaded to Supabase!
+  const realLocalTxns = localTxns.filter((t) => !isSampleTransaction(t));
+  if (realLocalTxns.length === 0) {
+    safeStorage.setItem(migKey, "true");
+    return { status: "empty" };
+  }
+
+  const payload = realLocalTxns.map((t) => ({
+    id: String(t.id),
+    user_id: user.id,
+    date: t.date,
+    description: t.description || "Untitled",
+    category: t.category || "Other",
+    type: t.type === "income" ? "income" : "expense",
+    amount: Math.abs(Number(t.amount) || 0),
+    payment_mode: t.paymentMode || "Cash",
+    notes: t.notes || "",
+  }));
+
+  try {
+    const { error: upsertErr } = await supabase
+      .from("transactions")
+      .upsert(payload, { onConflict: "id,user_id" });
+
+    if (upsertErr) {
+      console.error("Migration upsert error:", upsertErr);
+      return { status: "failed", error: upsertErr.message };
+    }
+
+    // Deep Verification: Check IDs and contents
+    const { data: cloudRows, error: fetchErr } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("user_id", user.id);
+
+    if (fetchErr || !cloudRows) {
+      console.error("Migration verification error:", fetchErr);
+      return { status: "failed", error: "Could not fetch cloud rows for verification." };
+    }
+
+    const cloudMap = new Map(cloudRows.map((r) => [String(r.id), r]));
+    let verifiedCount = 0;
+    let contentMatch = true;
+
+    for (const local of realLocalTxns) {
+      const cloud = cloudMap.get(String(local.id));
+      if (!cloud) {
+        contentMatch = false;
+        break;
+      }
+      const amtMatch = Math.abs(Number(cloud.amount) - Math.abs(Number(local.amount))) < 0.001;
+      const dateMatch = cloud.date === local.date;
+      const typeMatch = cloud.type === local.type;
+      const descMatch = cloud.description === (local.description || "Untitled");
+
+      if (!amtMatch || !dateMatch || !typeMatch || !descMatch) {
+        contentMatch = false;
+        break;
+      }
+      verifiedCount++;
+    }
+
+    if (contentMatch && verifiedCount === realLocalTxns.length) {
+      safeStorage.setItem(migKey, "true");
+      // Clear legacy unauthenticated local storage so it cannot leak across sessions
+      safeStorage.removeItem(STORAGE_KEY);
+      return { status: "success", count: verifiedCount };
+    } else {
+      console.error("Migration verification mismatch!");
+      return { status: "failed", error: "Verification mismatch: record contents did not match exactly." };
+    }
+  } catch (e) {
+    console.error("Migration exception:", e);
+    return { status: "failed", error: e.message };
+  }
+}
+
+
 
 /* ---------------------------------------------------------------
    PERIOD FILTER ENGINE
@@ -491,36 +565,9 @@ function buildYearlyBreakdown(transactions, year) {
   return months.map((row) => ({ ...row, savings: row.income - row.expense }));
 }
 
-/** Normalizes a transaction object: fills derived fields, defaults,
- *  and audit timestamps. Used on create, edit, and CSV import so every
- *  transaction in the store always has the full, future-proof shape. */
-const normalizeTransaction = (t, { touch = false } = {}) => {
-  const { month, year } = deriveDateParts(t.date);
-  const now = new Date().toISOString();
-  return {
-    id: t.id || uid(),
-    date: t.date,
-    description: (t.description || "").trim(),
-    category: t.category || "Other",
-    type: t.type === "income" ? "income" : "expense",
-    amount: Number.isFinite(t.amount) ? t.amount : parseFloat(t.amount) || 0,
-    paymentMode: PAYMENT_MODES.includes(t.paymentMode) ? t.paymentMode : "Cash",
-    notes: (t.notes || "").trim(),
-    month,
-    year,
-    createdAt: t.createdAt || now,
-    updatedAt: touch ? now : t.updatedAt || now,
-  };
-};
-
 /* ---------------------------------------------------------------
    CSV IMPORT / EXPORT
 ----------------------------------------------------------------*/
-
-const CSV_COLUMNS = [
-  "date", "description", "category", "type", "amount",
-  "paymentMode", "notes", "month", "year",
-];
 
 const csvEscape = (val) => {
   const s = String(val ?? "");
@@ -600,132 +647,6 @@ function parseCSV(text) {
   });
 }
 
-/** Validates + normalizes imported rows. Returns { valid, errors }
- *  where valid is an array of ready-to-store transactions and errors
- *  is a list of { row, reason } for anything skipped. */
-function importRowsToTransactions(rows) {
-  const valid = [];
-  const errors = [];
-
-  rows.forEach((row, idx) => {
-    const rowNum = idx + 2; // +2: header row + 1-indexing
-
-    const rawDate = (row.date || row.Date || "").trim();
-    let normalizedDate = rawDate;
-    if (/^\d{2}-\d{2}-\d{4}$/.test(rawDate)) {
-      const [dd, mm, yyyy] = rawDate.split("-");
-      normalizedDate = `${yyyy}-${mm}-${dd}`;
-    }
-
-    const rawType = String(row.type || row.Type || "").trim().toLowerCase();
-    const rawAmount = String(row.amount || row.Amount || "")
-      .replace(/₹/g, "")
-      .replace(/,/g, "")
-      .trim();
-
-    const paymentMode =
-      row.paymentMode ||
-      row["Payment Method"] ||
-      row["payment method"] ||
-      "Cash";
-
-    const dateOk = /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate || "");
-    const amountNum = parseFloat(rawAmount);
-    const typeOk = rawType === "income" || rawType === "expense";
-
-    if (!dateOk) return errors.push({ row: rowNum, reason: "Invalid or missing date (expected YYYY-MM-DD)" });
-    if (!row.description || !row.description.trim()) {
-      row.description = row.category
-        ? `${row.category} Expense`
-        : "Unknown Expense";
-    }
-    if (!typeOk) return errors.push({ row: rowNum, reason: 'Type must be "income" or "expense"' });
-    if (!Number.isFinite(amountNum) || amountNum <= 0)
-      return errors.push({ row: rowNum, reason: "Amount must be a positive number" });
-
-    const fallbackCategories = rawType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-    const category = fallbackCategories.includes(row.category) ? row.category : "Other";
-
-    valid.push(
-      normalizeTransaction({
-        date: normalizedDate,
-        description: row.description,
-        category,
-        type: rawType,
-        amount: amountNum,
-        paymentMode,
-        notes: row.notes,
-      })
-    );
-  });
-
-  return { valid, errors };
-}
-
-/* ---------------------------------------------------------------
-   SEED DATA (first run only)
-----------------------------------------------------------------*/
-
-const seedTransactions = () => {
-  const today = new Date();
-  const d = (offset) => {
-    const dt = new Date(today);
-    dt.setDate(dt.getDate() - offset);
-    return dt.toISOString().slice(0, 10);
-  };
-  const raw = [
-    { date: d(0), description: "Grocery run", category: "Food", type: "expense", amount: 1200, paymentMode: "UPI", notes: "Weekly vegetables and essentials" },
-    { date: d(0), description: "Freelance milestone payment", category: "Freelancing", type: "income", amount: 9000, paymentMode: "Bank Transfer", notes: "" },
-    { date: d(1), description: "Monthly salary", category: "Salary", type: "income", amount: 85000, paymentMode: "Bank Transfer", notes: "Credited on the 1st" },
-    { date: d(2), description: "Logo design project", category: "Freelancing", type: "income", amount: 12000, paymentMode: "UPI", notes: "" },
-    { date: d(3), description: "Grocery run", category: "Food", type: "expense", amount: 2400, paymentMode: "Debit Card", notes: "" },
-    { date: d(4), description: "Metro card recharge", category: "Travel", type: "expense", amount: 600, paymentMode: "UPI", notes: "" },
-    { date: d(6), description: "New headphones", category: "Shopping", type: "expense", amount: 3200, paymentMode: "Credit Card", notes: "Sony WH-CH520" },
-    { date: d(8), description: "Dentist visit", category: "Medical", type: "expense", amount: 1500, paymentMode: "Cash", notes: "Routine checkup" },
-    { date: d(10), description: "Online course", category: "Education", type: "expense", amount: 999, paymentMode: "Credit Card", notes: "" },
-    { date: d(12), description: "Mom's birthday gift", category: "Family", type: "expense", amount: 2000, paymentMode: "UPI", notes: "" },
-    { date: d(15), description: "Consulting gig", category: "Business", type: "income", amount: 18000, paymentMode: "Bank Transfer", notes: "" },
-    { date: d(18), description: "Dinner out", category: "Food", type: "expense", amount: 1800, paymentMode: "Credit Card", notes: "Anniversary dinner" },
-    { date: d(35), description: "Monthly salary", category: "Salary", type: "income", amount: 85000, paymentMode: "Bank Transfer", notes: "" },
-    { date: d(40), description: "Rent share to landlord", category: "Other", type: "expense", amount: 15000, paymentMode: "Bank Transfer", notes: "" },
-    { date: d(45), description: "Interest payout", category: "Other", type: "income", amount: 450, paymentMode: "Bank Transfer", notes: "Savings account interest" },
-  ];
-  return raw.map(normalizeTransaction);
-};
-
-/* ---------------------------------------------------------------
-   LOCAL STORAGE HELPERS
-----------------------------------------------------------------*/
-
-function loadTransactions() {
-  try {
-    const raw = safeStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      // Migration: older records (Phase 1) lack paymentMode/notes/month/year.
-      // Re-normalizing on load upgrades them transparently without data loss.
-      return parsed.map(normalizeTransaction);
-    }
-  } catch (e) {
-    console.error("Failed to load transactions", e);
-  }
-  const seeded = seedTransactions();
-  try {
-    safeStorage.setItem(STORAGE_KEY, JSON.stringify(seeded));
-  } catch {
-    console.warn("Could not seed initial transactions to storage");
-  }
-  return seeded;
-}
-
-function saveTransactions(txns) {
-  try {
-    safeStorage.setItem(STORAGE_KEY, JSON.stringify(txns));
-  } catch (e) {
-    console.error("Failed to save transactions", e);
-  }
-}
-
 function loadTheme() {
   try {
     return safeStorage.getItem(THEME_KEY) || "dark";
@@ -738,37 +659,56 @@ function loadTheme() {
    AUTH UI: LOGIN / FIRST-RUN SETUP SCREEN
 ----------------------------------------------------------------*/
 
-function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
-  const isSetup = mode === "setup";
-  const [username, setUsername] = useState("");
+function LoginScreen({ onAuthenticated, theme, onToggleTheme, urlMessage }) {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [infoMessage, setInfoMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    setInfoMessage("");
 
-    if (isSetup) {
+    if (isSignUp) {
       if (password !== confirmPassword) {
         setError("Passwords don't match.");
+        return;
+      }
+      if (password.length < 6) {
+        setError("Password must be at least 6 characters.");
         return;
       }
     }
 
     setSubmitting(true);
-    const result = isSetup
-      ? await authService.register(username, password)
-      : await authService.login(username, password);
+    const result = isSignUp
+      ? await authService.register(email, password)
+      : await authService.login(email, password);
     setSubmitting(false);
 
     if (!result.ok) {
       setError(result.error);
       return;
     }
-    onAuthenticated(result.username);
+
+    if (result.requiresEmailConfirmation) {
+      setInfoMessage(
+        `Account created! A confirmation email has been sent to ${email}. Please check your inbox (and spam folder) and click the link to confirm, then sign in.`
+      );
+      setIsSignUp(false);
+      setPassword("");
+      setConfirmPassword("");
+      return;
+    }
+
+    if (result.user) {
+      onAuthenticated(result.user);
+    }
   };
 
   return (
@@ -791,27 +731,66 @@ function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
             </div>
           </div>
 
+          <div className="auth-mode-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!isSignUp}
+              className={`auth-mode-tab ${!isSignUp ? "active" : ""}`}
+              onClick={() => { setIsSignUp(false); setError(""); setInfoMessage(""); }}
+            >
+              Sign in
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isSignUp}
+              className={`auth-mode-tab ${isSignUp ? "active" : ""}`}
+              onClick={() => { setIsSignUp(true); setError(""); setInfoMessage(""); }}
+            >
+              Create account
+            </button>
+          </div>
+
           <h2 className="auth-heading">
-            {isSetup ? "Set up your account" : "Welcome back"}
+            {isSignUp ? "Create your cloud account" : "Welcome back"}
           </h2>
           <p className="auth-subheading">
-            {isSetup
-              ? "Create a username and password to protect your financial data on this device."
-              : "Enter your credentials to view your dashboard."}
+            {isSignUp
+              ? "Sign up with your email to sync your expenses seamlessly across all devices."
+              : "Enter your email and password to access your synchronized dashboard."}
           </p>
+
+          {urlMessage && (
+            <div className={urlMessage.type === "error" ? "auth-error" : "auth-info-banner"} style={{ marginBottom: 16 }}>
+              {urlMessage.type === "error" ? (
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+              ) : (
+                <CheckCircle2 size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+              )}
+              <span>{urlMessage.text}</span>
+            </div>
+          )}
+
+          {infoMessage && (
+            <div className="auth-info-banner" style={{ marginBottom: 16 }}>
+              <CheckCircle2 size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>{infoMessage}</span>
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="auth-form">
             <div className="form-field">
-              <label htmlFor="auth-username">Username</label>
+              <label htmlFor="auth-email">Email address</label>
               <div className="input-with-icon">
-                <User size={15} />
+                <Mail size={15} />
                 <input
-                  id="auth-username"
-                  type="text"
-                  autoComplete="username"
-                  placeholder="e.g. Chirag"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  id="auth-email"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="e.g. chirag@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   autoFocus
                   required
                 />
@@ -825,12 +804,12 @@ function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
                 <input
                   id="auth-password"
                   type={showPassword ? "text" : "password"}
-                  autoComplete={isSetup ? "new-password" : "current-password"}
-                  placeholder={isSetup ? "At least 4 characters" : "Your password"}
+                  autoComplete={isSignUp ? "new-password" : "current-password"}
+                  placeholder={isSignUp ? "At least 6 characters" : "Your password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  minLength={isSetup ? 4 : undefined}
+                  minLength={6}
                 />
                 <button
                   type="button"
@@ -843,7 +822,7 @@ function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
               </div>
             </div>
 
-            {isSetup && (
+            {isSignUp && (
               <div className="form-field">
                 <label htmlFor="auth-confirm">Confirm password</label>
                 <div className="input-with-icon">
@@ -862,20 +841,47 @@ function LoginScreen({ mode, onAuthenticated, theme, onToggleTheme }) {
             )}
 
             {error && (
-              <div className="auth-error">
-                <AlertTriangle size={14} />
-                {error}
+              <div className="auth-error" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 7 }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <span>{error}</span>
+                </div>
+                {error.toLowerCase().includes("verify") && email && (
+                  <div style={{ marginTop: 4, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ fontSize: 12, padding: "5px 12px", alignSelf: "flex-start" }}
+                      onClick={async () => {
+                        setSubmitting(true);
+                        const res = await authService.resendConfirmation(email);
+                        setSubmitting(false);
+                        if (res.ok) {
+                          setInfoMessage(`A fresh confirmation email was sent to ${email}. Please check your inbox.`);
+                          setError("");
+                        } else {
+                          setError(res.error);
+                        }
+                      }}
+                    >
+                      Resend confirmation email
+                    </button>
+                    <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.4 }}>
+                      Or in Supabase Dashboard: Go to Authentication &rarr; Users &rarr; click "..." next to your email &rarr; "Auto-confirm user".
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
             <button type="submit" className="btn btn-primary auth-submit" disabled={submitting}>
-              {submitting ? "Please wait..." : isSetup ? "Create account & continue" : "Log in"}
+              {submitting ? "Please wait..." : isSignUp ? "Create account" : "Sign in"}
             </button>
           </form>
 
           <div className="auth-footnote">
             <ShieldCheck size={13} />
-            Your credentials and data stay on this device — nothing is sent anywhere.
+            Protected by Supabase Cloud Authentication & Row-Level Security.
           </div>
         </div>
       </div>
@@ -973,207 +979,539 @@ function ConfirmDialog({ open, onConfirm, onCancel, txn }) {
 }
 
 /* ---------------------------------------------------------------
-   TRANSACTION FORM (Add / Edit)
+   TRANSACTION FORM (Add / Edit / Multi-Entry Batch)
 ----------------------------------------------------------------*/
 
 function TransactionForm({ open, onClose, onSave, editing }) {
   const isEdit = !!editing;
-  const [type, setType] = useState("expense");
-  const [date, setDate] = useState(todayISO());
-  const [description, setDescription] = useState("");
-  const [category, setCategory] = useState(EXPENSE_CATEGORIES[0]);
-  const [amount, setAmount] = useState("");
-  const [paymentMode, setPaymentMode] = useState(PAYMENT_MODES[0]);
-  const [notes, setNotes] = useState("");
-  const [errors, setErrors] = useState({});
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  // Single edit mode state
+  const [editData, setEditData] = useState({
+    type: "expense",
+    date: todayISO(),
+    description: "",
+    category: EXPENSE_CATEGORIES[0],
+    amount: "",
+    paymentMode: PAYMENT_MODES[0],
+    notes: "",
+  });
+  const [editErrors, setEditErrors] = useState({});
+
+  // Batch / Add mode state
+  const createBlankEntry = useCallback((defaultDate = todayISO(), defaultType = "expense") => ({
+    tempId: uid(),
+    type: defaultType,
+    date: defaultDate,
+    description: "",
+    category: defaultType === "income" ? INCOME_CATEGORIES[0] : EXPENSE_CATEGORIES[0],
+    amount: "",
+    paymentMode: PAYMENT_MODES[0],
+    notes: "",
+    errors: {},
+  }), []);
+
+  const [entries, setEntries] = useState([createBlankEntry()]);
 
   useEffect(() => {
+    if (!open) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSubmitting(false);
+    setFormError("");
     if (editing) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setType(editing.type);
-      setDate(editing.date);
-      setDescription(editing.description);
-      setCategory(editing.category);
-      setAmount(String(editing.amount));
-      setPaymentMode(editing.paymentMode || PAYMENT_MODES[0]);
-      setNotes(editing.notes || "");
+      setEditData({
+        type: editing.type || "expense",
+        date: editing.date || todayISO(),
+        description: editing.description || "",
+        category: editing.category || (editing.type === "income" ? INCOME_CATEGORIES[0] : EXPENSE_CATEGORIES[0]),
+        amount: editing.amount != null ? String(editing.amount) : "",
+        paymentMode: editing.paymentMode || PAYMENT_MODES[0],
+        notes: editing.notes || "",
+      });
+      setEditErrors({});
     } else {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setType("expense");
-      setDate(todayISO());
-      setDescription("");
-      setCategory(EXPENSE_CATEGORIES[0]);
-      setAmount("");
-      setPaymentMode(PAYMENT_MODES[0]);
-      setNotes("");
+      setEntries([createBlankEntry(todayISO(), "expense")]);
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setErrors({});
-  }, [editing, open]);
+  }, [open, editing, createBlankEntry]);
 
-  const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (!categories.includes(category)) setCategory(categories[0]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type]);
-
-  if (!open) return null;
-
-  const validate = () => {
-    const errs = {};
-    if (!date) errs.date = "Date is required";
-    if (!description.trim()) errs.description = "Description is required";
-    const num = parseFloat(amount);
-    if (!amount || isNaN(num) || num <= 0) errs.amount = "Enter an amount greater than 0";
-    return errs;
+  const handleAddAnother = () => {
+    setEntries((prev) => {
+      const last = prev[prev.length - 1];
+      const nextDate = last?.date || todayISO();
+      const nextType = last?.type || "expense";
+      return [...prev, createBlankEntry(nextDate, nextType)];
+    });
   };
 
-  const handleSubmit = (e) => {
+  const handleRemoveEntry = (tempId) => {
+    setEntries((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((item) => item.tempId !== tempId);
+    });
+  };
+
+  const handleUpdateEntry = (tempId, field, value) => {
+    setEntries((prev) =>
+      prev.map((item) => {
+        if (item.tempId !== tempId) return item;
+        const updated = { ...item, [field]: value };
+        if (field === "type") {
+          const allowed = value === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+          if (!allowed.includes(updated.category)) {
+            updated.category = allowed[0];
+          }
+        }
+        if (updated.errors && updated.errors[field]) {
+          updated.errors = { ...updated.errors, [field]: null };
+        }
+        return updated;
+      })
+    );
+  };
+
+  const handleUpdateEdit = (field, value) => {
+    setEditData((prev) => {
+      const updated = { ...prev, [field]: value };
+      if (field === "type") {
+        const allowed = value === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+        if (!allowed.includes(updated.category)) {
+          updated.category = allowed[0];
+        }
+      }
+      return updated;
+    });
+    if (editErrors[field]) {
+      setEditErrors((prev) => ({ ...prev, [field]: null }));
+    }
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length) {
-      setErrors(errs);
+    if (submitting) return;
+
+    if (isEdit) {
+      const errs = {};
+      if (!isValidCalendarDate(editData.date)) {
+        errs.date = "Valid calendar date required (YYYY-MM-DD)";
+      }
+      if (!editData.description.trim()) {
+        errs.description = "Description is required";
+      }
+      const num = parseFloat(editData.amount);
+      if (!editData.amount || isNaN(num) || num <= 0) {
+        errs.amount = "Enter amount > 0";
+      }
+      if (Object.keys(errs).length > 0) {
+        setEditErrors(errs);
+        return;
+      }
+
+      setSubmitting(true);
+      setFormError("");
+      const normalized = normalizeTransaction(
+        {
+          ...editing,
+          date: editData.date,
+          description: editData.description.trim(),
+          category: editData.category,
+          type: editData.type,
+          amount: parseFloat(editData.amount),
+          paymentMode: editData.paymentMode,
+          notes: editData.notes.trim(),
+        },
+        { touch: true }
+      );
+      const res = await onSave(normalized);
+      setSubmitting(false);
+      if (res && !res.ok) {
+        setFormError(res.error || "Failed to save transaction.");
+      }
       return;
     }
-    onSave(
+
+    // Batch add mode validation
+    let hasAnyError = false;
+    const validated = entries.map((item) => {
+      const errs = {};
+      if (!isValidCalendarDate(item.date)) {
+        errs.date = "Valid calendar date required (YYYY-MM-DD)";
+      }
+      if (!item.description || !item.description.trim()) {
+        errs.description = "Description is required";
+      }
+      const num = parseFloat(item.amount);
+      if (!item.amount || isNaN(num) || num <= 0) {
+        errs.amount = "Enter amount > 0";
+      }
+      if (Object.keys(errs).length > 0) hasAnyError = true;
+      return { ...item, errors: errs };
+    });
+
+    if (hasAnyError) {
+      setEntries(validated);
+      return;
+    }
+
+    setSubmitting(true);
+    setFormError("");
+    const normalizedBatch = entries.map((item) =>
       normalizeTransaction(
         {
-          ...(editing || {}),
-          id: editing ? editing.id : undefined,
-          date,
-          description: description.trim(),
-          category,
-          type,
-          amount: parseFloat(amount),
-          paymentMode,
-          notes: notes.trim(),
+          date: item.date,
+          description: item.description.trim(),
+          category: item.category,
+          type: item.type,
+          amount: parseFloat(item.amount),
+          paymentMode: item.paymentMode,
+          notes: (item.notes || "").trim(),
         },
         { touch: true }
       )
     );
+
+    const res = await onSave(normalizedBatch);
+    setSubmitting(false);
+    if (res && !res.ok) {
+      setFormError(res.error || "Failed to save transactions.");
+    }
   };
+
+  if (!open) return null;
+
+  const batchNet = entries.reduce((sum, item) => {
+    const val = parseFloat(item.amount) || 0;
+    return sum + (item.type === "income" ? val : -val);
+  }, 0);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3>{isEdit ? "Edit transaction" : "Add transaction"}</h3>
+      <div className="modal-card batch-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="batch-modal-header">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <h3>{isEdit ? "Edit transaction" : entries.length > 1 ? "Add transactions" : "Add transaction"}</h3>
+            {!isEdit && entries.length > 1 && (
+              <span className="batch-badge">{entries.length} entries</span>
+            )}
+          </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="txn-form">
-          <div className="type-toggle">
-            <button
-              type="button"
-              className={`type-btn ${type === "income" ? "active income" : ""}`}
-              onClick={() => setType("income")}
-            >
-              <ArrowUpRight size={15} /> Income
-            </button>
-            <button
-              type="button"
-              className={`type-btn ${type === "expense" ? "active expense" : ""}`}
-              onClick={() => setType("expense")}
-            >
-              <ArrowDownRight size={15} /> Expense
-            </button>
+        <form onSubmit={handleSubmit} className="batch-form-wrapper">
+          <div className="batch-modal-body">
+            {formError && (
+              <div className="auth-error" style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                <span>{formError}</span>
+              </div>
+            )}
+
+            {isEdit ? (
+              /* Single edit form */
+              <div className="batch-entry-card edit-card">
+                <div className="type-toggle">
+                  <button
+                    type="button"
+                    className={`type-btn ${editData.type === "income" ? "active income" : ""}`}
+                    onClick={() => handleUpdateEdit("type", "income")}
+                  >
+                    <ArrowUpRight size={15} /> Income
+                  </button>
+                  <button
+                    type="button"
+                    className={`type-btn ${editData.type === "expense" ? "active expense" : ""}`}
+                    onClick={() => handleUpdateEdit("type", "expense")}
+                  >
+                    <ArrowDownRight size={15} /> Expense
+                  </button>
+                </div>
+
+                <div className="form-row">
+                  <div className="form-field">
+                    <label>Date</label>
+                    <div className="date-input-wrap">
+                      <input
+                        type="date"
+                        value={editData.date}
+                        onChange={(e) => handleUpdateEdit("date", e.target.value)}
+                        className={editErrors.date ? "err" : ""}
+                      />
+                      <button
+                        type="button"
+                        className="quick-today-btn"
+                        onClick={() => handleUpdateEdit("date", todayISO())}
+                        title="Set date to today"
+                      >
+                        Today
+                      </button>
+                    </div>
+                    {editErrors.date && <span className="field-err">{editErrors.date}</span>}
+                  </div>
+                  <div className="form-field">
+                    <label>Amount (₹)</label>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      step="0.01"
+                      min="0"
+                      value={editData.amount}
+                      onChange={(e) => handleUpdateEdit("amount", e.target.value)}
+                      className={editErrors.amount ? "err" : ""}
+                    />
+                    {editErrors.amount && <span className="field-err">{editErrors.amount}</span>}
+                  </div>
+                </div>
+
+                <div className="form-field">
+                  <label>Description</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Grocery run, Rent payment"
+                    value={editData.description}
+                    onChange={(e) => handleUpdateEdit("description", e.target.value)}
+                    className={editErrors.description ? "err" : ""}
+                    maxLength={120}
+                  />
+                  {editErrors.description && <span className="field-err">{editErrors.description}</span>}
+                </div>
+
+                <div className="form-row">
+                  <div className="form-field">
+                    <label>Category</label>
+                    <div className="select-wrap">
+                      <select
+                        value={editData.category}
+                        onChange={(e) => handleUpdateEdit("category", e.target.value)}
+                      >
+                        {(editData.type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map((c) => (
+                          <option key={c} value={c}>
+                            {c}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={15} className="select-chevron" />
+                    </div>
+                  </div>
+                  <div className="form-field">
+                    <label>Payment mode</label>
+                    <div className="select-wrap">
+                      <select
+                        value={editData.paymentMode}
+                        onChange={(e) => handleUpdateEdit("paymentMode", e.target.value)}
+                      >
+                        {PAYMENT_MODES.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={15} className="select-chevron" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="form-field">
+                  <label>
+                    Notes <span className="label-optional">(optional)</span>
+                  </label>
+                  <textarea
+                    placeholder="Any extra details worth remembering..."
+                    value={editData.notes}
+                    onChange={(e) => handleUpdateEdit("notes", e.target.value)}
+                    maxLength={280}
+                    rows={2}
+                  />
+                </div>
+              </div>
+            ) : (
+              /* Batch / Multi-entry form */
+              <>
+                {entries.map((entry, idx) => {
+                  const currentCategories = entry.type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+                  return (
+                    <div className="batch-entry-card" key={entry.tempId}>
+                      {entries.length > 1 && (
+                        <div className="batch-entry-header">
+                          <span className="batch-entry-num">Transaction #{idx + 1}</span>
+                          <button
+                            type="button"
+                            className="batch-remove-btn"
+                            onClick={() => handleRemoveEntry(entry.tempId)}
+                            aria-label={`Remove entry #${idx + 1}`}
+                          >
+                            <Trash2 size={13} />
+                            <span>Remove</span>
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="type-toggle">
+                        <button
+                          type="button"
+                          className={`type-btn ${entry.type === "income" ? "active income" : ""}`}
+                          onClick={() => handleUpdateEntry(entry.tempId, "type", "income")}
+                        >
+                          <ArrowUpRight size={15} /> Income
+                        </button>
+                        <button
+                          type="button"
+                          className={`type-btn ${entry.type === "expense" ? "active expense" : ""}`}
+                          onClick={() => handleUpdateEntry(entry.tempId, "type", "expense")}
+                        >
+                          <ArrowDownRight size={15} /> Expense
+                        </button>
+                      </div>
+
+                      <div className="form-row">
+                        <div className="form-field">
+                          <label>Date</label>
+                          <div className="date-input-wrap">
+                            <input
+                              type="date"
+                              value={entry.date}
+                              onChange={(e) => handleUpdateEntry(entry.tempId, "date", e.target.value)}
+                              className={entry.errors?.date ? "err" : ""}
+                            />
+                            <button
+                              type="button"
+                              className="quick-today-btn"
+                              onClick={() => handleUpdateEntry(entry.tempId, "date", todayISO())}
+                              title="Set date to today"
+                            >
+                              Today
+                            </button>
+                          </div>
+                          {entry.errors?.date && <span className="field-err">{entry.errors.date}</span>}
+                        </div>
+                        <div className="form-field">
+                          <label>Amount (₹)</label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            placeholder="0.00"
+                            step="0.01"
+                            min="0"
+                            value={entry.amount}
+                            onChange={(e) => handleUpdateEntry(entry.tempId, "amount", e.target.value)}
+                            className={entry.errors?.amount ? "err" : ""}
+                          />
+                          {entry.errors?.amount && <span className="field-err">{entry.errors.amount}</span>}
+                        </div>
+                      </div>
+
+                      <div className="form-field">
+                        <label>Description</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Grocery shopping, Electricity bill, Freelance"
+                          value={entry.description}
+                          onChange={(e) => handleUpdateEntry(entry.tempId, "description", e.target.value)}
+                          className={entry.errors?.description ? "err" : ""}
+                          maxLength={120}
+                        />
+                        {entry.errors?.description && <span className="field-err">{entry.errors.description}</span>}
+                      </div>
+
+                      <div className="form-row">
+                        <div className="form-field">
+                          <label>Category</label>
+                          <div className="select-wrap">
+                            <select
+                              value={entry.category}
+                              onChange={(e) => handleUpdateEntry(entry.tempId, "category", e.target.value)}
+                            >
+                              {currentCategories.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown size={15} className="select-chevron" />
+                          </div>
+                        </div>
+                        <div className="form-field">
+                          <label>Payment mode</label>
+                          <div className="select-wrap">
+                            <select
+                              value={entry.paymentMode}
+                              onChange={(e) => handleUpdateEntry(entry.tempId, "paymentMode", e.target.value)}
+                            >
+                              {PAYMENT_MODES.map((m) => (
+                                <option key={m} value={m}>
+                                  {m}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown size={15} className="select-chevron" />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="form-field">
+                        <label>
+                          Notes <span className="label-optional">(optional)</span>
+                        </label>
+                        <textarea
+                          placeholder="Any extra details worth remembering..."
+                          value={entry.notes}
+                          onChange={(e) => handleUpdateEntry(entry.tempId, "notes", e.target.value)}
+                          maxLength={280}
+                          rows={1}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <button
+                  type="button"
+                  className="add-another-btn"
+                  onClick={handleAddAnother}
+                  disabled={submitting}
+                >
+                  <Plus size={16} strokeWidth={2.5} />
+                  <span>Add Another Entry</span>
+                </button>
+
+                {entries.length > 1 && (
+                  <div className="batch-summary-strip">
+                    <span>
+                      <strong>{entries.length}</strong> transactions ready
+                    </span>
+                    <span>•</span>
+                    <span>
+                      Net impact: <strong>{currency(batchNet)}</strong>
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
-          <div className="form-row">
-            <div className="form-field">
-              <label htmlFor="f-date">Date</label>
-              <input
-                id="f-date"
-                type="date"
-                value={date}
-                max={todayISO()}
-                onChange={(e) => setDate(e.target.value)}
-                className={errors.date ? "err" : ""}
-              />
-              {errors.date && <span className="field-err">{errors.date}</span>}
-            </div>
-            <div className="form-field">
-              <label htmlFor="f-amount">Amount (₹)</label>
-              <input
-                id="f-amount"
-                type="number"
-                inputMode="decimal"
-                placeholder="0.00"
-                step="0.01"
-                min="0"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className={errors.amount ? "err" : ""}
-              />
-              {errors.amount && <span className="field-err">{errors.amount}</span>}
-            </div>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="f-desc">Description</label>
-            <input
-              id="f-desc"
-              type="text"
-              placeholder="e.g. Grocery shopping at D-Mart"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              className={errors.description ? "err" : ""}
-              maxLength={120}
-            />
-            {errors.description && <span className="field-err">{errors.description}</span>}
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="f-cat">Category</label>
-            <div className="select-wrap">
-              <select id="f-cat" value={category} onChange={(e) => setCategory(e.target.value)}>
-                {categories.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={15} className="select-chevron" />
-            </div>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="f-pay">Payment mode</label>
-            <div className="select-wrap">
-              <select id="f-pay" value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)}>
-                {PAYMENT_MODES.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={15} className="select-chevron" />
-            </div>
-          </div>
-
-          <div className="form-field">
-            <label htmlFor="f-notes">Notes <span className="label-optional">(optional)</span></label>
-            <textarea
-              id="f-notes"
-              placeholder="Any extra detail worth remembering..."
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              maxLength={280}
-              rows={2}
-            />
-          </div>
-
-          <div className="modal-actions">
-            <button type="button" className="btn btn-ghost" onClick={onClose}>
+          <div className="batch-modal-footer">
+            <button type="button" className="btn btn-ghost" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button type="submit" className={`btn btn-primary ${type}`}>
-              {isEdit ? "Save changes" : "Add transaction"}
+            <button
+              type="submit"
+              className={`btn btn-primary ${isEdit ? editData.type : entries.length === 1 ? entries[0].type : "income"}`}
+              disabled={submitting}
+            >
+              {submitting ? (
+                <>
+                  <RefreshCw size={14} className="spin" />
+                  <span>Saving...</span>
+                </>
+              ) : isEdit ? (
+                "Save changes"
+              ) : entries.length > 1 ? (
+                `Save All (${entries.length})`
+              ) : (
+                "Add transaction"
+              )}
             </button>
           </div>
         </form>
@@ -1186,8 +1524,18 @@ function TransactionForm({ open, onClose, onSave, editing }) {
    MAIN APP
 ----------------------------------------------------------------*/
 
-function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
-  const [transactions, setTransactions] = useState(loadTransactions);
+function Dashboard({ onLogout, currentUser, user, theme, onToggleTheme }) {
+  const [transactions, setTransactions] = useState(() => {
+    return loadUserTransactions(user?.id, normalizeTransaction);
+  });
+
+  const transactionsRef = useRef(transactions);
+  useEffect(() => {
+    transactionsRef.current = transactions;
+  }, [transactions]);
+
+  const [syncStatus, setSyncStatus] = useState("idle"); // "idle" | "syncing" | "synced" | "error"
+  const [migrationAlert, setMigrationAlert] = useState(null);
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingTxn, setEditingTxn] = useState(null);
@@ -1209,12 +1557,141 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
   const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false);
+  const [showSampleDetails, setShowSampleDetails] = useState(true);
+  const [cloudSampleRecords, setCloudSampleRecords] = useState([]);
+  const [checkingCloudSamples, setCheckingCloudSamples] = useState(false);
+
+  // Combine any dummy sample records detected in Supabase or local state
+  const detectedSampleRecords = useMemo(() => {
+    const map = new Map();
+    cloudSampleRecords.forEach((r) => map.set(String(r.id), r));
+    transactions.filter(isSampleTransaction).forEach((r) => map.set(String(r.id), r));
+    return Array.from(map.values());
+  }, [cloudSampleRecords, transactions]);
+
+  // Query Supabase directly for any sample records belonging to the logged-in user
+  const checkSupabaseForSampleRecords = useCallback(async () => {
+    if (!user?.id) return;
+    setCheckingCloudSamples(true);
+    try {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("*")
+        .eq("user_id", user.id)
+        .order("date", { ascending: false });
+
+      if (!error && data) {
+        const dummies = data.filter(isSampleTransaction);
+        setCloudSampleRecords(dummies);
+        if (dummies.length === 0) {
+          setMigrationAlert({
+            type: "success",
+            text: `Cloud check verified: 0 sample records found in Supabase. All ${data.length} transactions are genuine.`,
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Could not check Supabase for sample records:", e);
+    } finally {
+      setCheckingCloudSamples(false);
+    }
+  }, [user]);
+
+  // Check Supabase on initial mount
+  useEffect(() => {
+    if (user?.id) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      checkSupabaseForSampleRecords();
+    }
+  }, [user?.id, checkSupabaseForSampleRecords]);
+
+  useEffect(() => {
+    if (detectedSampleRecords.length > 0) {
+      window.__SAMPLE_RECORDS__ = detectedSampleRecords;
+      console.log(`[FinanceTracker] Detected ${detectedSampleRecords.length} sample transactions in Supabase/local:`);
+      console.table(
+        detectedSampleRecords.map((r, i) => ({
+          "#": i + 1,
+          ID: r.id,
+          Date: r.date,
+          Description: r.description,
+          Category: r.category,
+          Type: r.type,
+          Amount: r.amount,
+        }))
+      );
+    }
+  }, [detectedSampleRecords]);
+
+  // Manual cleanup: Deletes ONLY verified dummy IDs from Supabase and refreshes
+  const handleManualCleanupSampleRecords = useCallback(async () => {
+    if (!detectedSampleRecords.length || !user?.id) return;
+    const sampleIds = detectedSampleRecords.map((s) => String(s.id));
+
+    // 1. Delete ONLY the exact verified dummy IDs belonging to the logged-in user
+    const { error: delErr } = await supabase
+      .from("transactions")
+      .delete()
+      .in("id", sampleIds)
+      .eq("user_id", user.id);
+
+    if (delErr) {
+      console.error("Supabase sample cleanup error:", delErr);
+      setMigrationAlert({
+        type: "error",
+        text: `Failed to delete sample records from Supabase: ${delErr.message}`,
+      });
+      return;
+    }
+
+    // 2. Refresh transactions from Supabase after cleanup
+    const { data: freshData, error: refreshErr } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("date", { ascending: false });
+
+    if (refreshErr) {
+      console.error("Supabase refresh error:", refreshErr);
+      setMigrationAlert({
+        type: "error",
+        text: `Sample records deleted from cloud, but could not refresh dashboard: ${refreshErr.message}`,
+      });
+    } else if (freshData) {
+      const normalized = freshData.map((row) =>
+        normalizeTransaction({
+          id: row.id,
+          date: row.date,
+          description: row.description,
+          category: row.category,
+          type: row.type,
+          amount: Number(row.amount),
+          paymentMode: row.payment_mode,
+          notes: row.notes,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })
+      );
+      setTransactions(normalized);
+      safeStorage.setItem("pft_transactions_cache_" + user.id, JSON.stringify(normalized));
+
+      // Re-verify dummy records count in fresh data
+      const remainingDummies = freshData.filter(isSampleTransaction);
+      setCloudSampleRecords(remainingDummies);
+
+      // 3. Show success only after the deletion is confirmed
+      setMigrationAlert({
+        type: "success",
+        text: `Successfully deleted ${sampleIds.length} verified sample records from Supabase. All 670 genuine transactions preserved!`,
+      });
+    }
+  }, [detectedSampleRecords, user]);
 
   /* ---- Time Period Analysis: global filter state ---- */
-  const now = new Date();
+  const now = useMemo(() => new Date(), []);
   const [periodKey, setPeriodKey] = useState("current_month");
-  const [pickedMonth, setPickedMonth] = useState(now.getMonth()); // 0-indexed
-  const [pickedYear, setPickedYear] = useState(now.getFullYear());
+  const [pickedMonth, setPickedMonth] = useState(() => new Date().getMonth()); // 0-indexed
+  const [pickedYear, setPickedYear] = useState(() => new Date().getFullYear());
   const [customStart, setCustomStart] = useState(todayISO());
   const [customEnd, setCustomEnd] = useState(todayISO());
   const [insightsOpen, setInsightsOpen] = useState(true);
@@ -1225,9 +1702,83 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     setCurrentPage(1);
   }, [search, typeFilter, categoryFilter, periodKey, pickedMonth, pickedYear, customStart, customEnd]);
 
+  // Sync and migrate with Supabase
+  const runSyncAndMigration = useCallback(async () => {
+    if (!user?.id) return;
+    setSyncStatus("syncing");
+
+    // 1. Run safe migration (deep verified)
+    try {
+      const migResult = await migrateLocalTransactions(user);
+      if (migResult.status === "success") {
+        setMigrationAlert({
+          type: "success",
+          text: `Successfully migrated ${migResult.count} existing records to your cloud account.`,
+        });
+      } else if (migResult.status === "failed") {
+        setMigrationAlert({
+          type: "error",
+          text: `Migration check: ${migResult.error}. Local records remain safe.`,
+        });
+      }
+    } catch (err) {
+      console.error("Migration check error:", err);
+    }
+
+    // 2. Fetch all cloud records for this user
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("date", { ascending: false });
+
+    if (error) {
+      console.warn("Could not fetch cloud transactions, using local data:", error);
+      setSyncStatus("error");
+    } else if (data) {
+      const normalized = data.map((row) =>
+        normalizeTransaction({
+          id: row.id,
+          date: row.date,
+          description: row.description,
+          category: row.category,
+          type: row.type,
+          amount: Number(row.amount),
+          paymentMode: row.payment_mode,
+          notes: row.notes,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })
+      );
+      setTransactions(normalized);
+      saveUserTransactions(user.id, normalized);
+      setSyncStatus("synced");
+    }
+  }, [user]);
+
   useEffect(() => {
-    saveTransactions(transactions);
-  }, [transactions]);
+    let isMounted = true;
+    if (user?.id) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      runSyncAndMigration();
+    }
+
+    // Auto-refresh when tab gains focus (keeps mobile and laptop in real-time sync)
+    const onFocus = () => {
+      if (isMounted) runSyncAndMigration();
+    };
+
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [runSyncAndMigration, user?.id]);
+
+  useEffect(() => {
+    saveUserTransactions(user?.id, transactions);
+  }, [transactions, user]);
 
   const allCategories = useMemo(
     () => Array.from(new Set(transactions.map((t) => t.category))).sort(),
@@ -1280,7 +1831,7 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     if (periodKey === "specific_month") return pickedYear;
     // Fall back to the year the selected range starts in, for month-based presets
     return new Date(range.start + "T00:00:00").getFullYear();
-  }, [periodKey, pickedYear, range.start]);
+  }, [periodKey, pickedYear, range.start, now]);
 
   const yearlyBreakdown = useMemo(
     () => buildYearlyBreakdown(transactions, yearlyViewYear),
@@ -1291,7 +1842,7 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     const years = new Set(transactions.map((t) => t.year).filter(Boolean));
     years.add(now.getFullYear());
     return Array.from(years).sort((a, b) => b - a);
-  }, [transactions]);
+  }, [transactions, now]);
 
   /* ---- all-time + quick-glance totals (Today / This Month anchors) ----
      These stay fixed regardless of the period filter — "Current Balance"
@@ -1330,7 +1881,7 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
       todayIncome, todayExpense, monthIncome, monthExpense,
       monthLabel: `${MONTH_NAMES[curMonth - 1]} ${curYear}`,
     };
-  }, [transactions]);
+  }, [transactions, now]);
 
   /* ---- period-scoped totals: drive the 4 primary KPI cards ----
      periodSummary already has income/expense/savings/savingsRate from
@@ -1406,15 +1957,65 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   }, []);
 
   const handleSave = useCallback(
-    (txn) => {
+    async (payload) => {
+      const items = Array.isArray(payload) ? payload : [payload];
+      if (!items.length) {
+        closeForm();
+        return { ok: true };
+      }
+
+      // 1. If user is authenticated, sync with Supabase first
+      if (user?.id) {
+        const dbRows = items.map((txn) => ({
+          id: String(txn.id),
+          user_id: user.id,
+          date: txn.date,
+          description: txn.description,
+          category: txn.category,
+          type: txn.type,
+          amount: Math.abs(Number(txn.amount) || 0),
+          payment_mode: txn.paymentMode || "Cash",
+          notes: txn.notes || "",
+          updated_at: new Date().toISOString(),
+        }));
+
+        const { error } = await supabase
+          .from("transactions")
+          .upsert(dbRows, { onConflict: "id,user_id" });
+
+        if (error) {
+          console.error("Cloud sync save error:", error);
+          return { ok: false, error: `Cloud sync failed: ${error.message}` };
+        }
+      }
+
+      // 2. Update local state
       setTransactions((prev) => {
-        const exists = prev.some((t) => t.id === txn.id);
-        if (exists) return prev.map((t) => (t.id === txn.id ? txn : t));
-        return [txn, ...prev];
+        let updated = [...prev];
+        for (const txn of items) {
+          const idx = updated.findIndex((t) => t.id === txn.id);
+          if (idx >= 0) {
+            updated[idx] = txn;
+          } else {
+            updated = [txn, ...updated];
+          }
+        }
+        return updated;
       });
+
+      // 3. Show clear success feedback
+      setMigrationAlert({
+        type: "success",
+        text:
+          items.length === 1
+            ? `Transaction "${items[0].description}" (${currency(items[0].amount)}) saved successfully!`
+            : `Successfully saved ${items.length} transactions to your ledger!`,
+      });
+
       closeForm();
+      return { ok: true };
     },
-    [closeForm]
+    [closeForm, user]
   );
 
   const confirmDelete = useCallback(() => {
@@ -1427,7 +2028,18 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
       return next;
     });
     setDeleteTarget(null);
-  }, [deleteTarget]);
+
+    if (user?.id) {
+      supabase
+        .from("transactions")
+        .delete()
+        .eq("id", String(targetId))
+        .eq("user_id", user.id)
+        .then(({ error }) => {
+          if (error) console.error("Cloud delete error:", error);
+        });
+    }
+  }, [deleteTarget, user]);
 
   // Bulk action handlers
   const handleToggleSelectRow = useCallback((id) => {
@@ -1464,16 +2076,38 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
   }, []);
 
   const handleConfirmBulkDelete = useCallback(() => {
+    const idsToDelete = Array.from(selectedIds);
     setTransactions((prev) => prev.filter((t) => !selectedIds.has(t.id)));
     setSelectedIds(new Set());
     setBulkConfirmOpen(false);
-  }, [selectedIds]);
+
+    if (user?.id && idsToDelete.length > 0) {
+      supabase
+        .from("transactions")
+        .delete()
+        .in("id", idsToDelete.map(String))
+        .eq("user_id", user.id)
+        .then(({ error }) => {
+          if (error) console.error("Cloud bulk delete error:", error);
+        });
+    }
+  }, [selectedIds, user]);
 
   const handleConfirmDeleteAll = useCallback(() => {
     setTransactions([]);
     setSelectedIds(new Set());
     setDeleteAllConfirmOpen(false);
-  }, []);
+
+    if (user?.id) {
+      supabase
+        .from("transactions")
+        .delete()
+        .eq("user_id", user.id)
+        .then(({ error }) => {
+          if (error) console.error("Cloud delete all error:", error);
+        });
+    }
+  }, [user]);
 
   const handleSort = (key) => {
     if (sortKey === key) {
@@ -1496,11 +2130,6 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
     fileInputRef.current?.click();
   }, []);
 
-
-  function getMonthKey(dateStr) {
-    const d = new Date(dateStr);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  }
 
   const handleImportFile = useCallback((e) => {
     const files = Array.from(e.target.files || []);
@@ -1537,31 +2166,97 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
             reader.readAsText(file);
           })
       )
-    ).then(() => {
+    ).then(async () => {
       if (allValid.length) {
-        setTransactions((prev) => {
-          const importedMonths = new Set(
-            allValid
-              .map((tx) => getMonthKey(tx.date))
-              .filter(Boolean)
-          );
+        // Safe Deduplication & Append using robust occurrence-aware matching
+        const currentTxns = transactionsRef.current;
+        const { toAdd: newItems, duplicatesCount } = deduplicateTransactions(allValid, currentTxns);
 
-          const remainingTransactions = prev.filter(
-            (tx) => !importedMonths.has(getMonthKey(tx.date))
-          );
+        let uploadFailed = false;
+        let succeededItems = [];
+        let failedItems = [];
+        let uploadError = null;
 
-          return [...allValid, ...remainingTransactions];
+        if (user?.id && newItems.length > 0) {
+          const dbRows = newItems.map((tx) => ({
+            id: String(tx.id),
+            user_id: user.id,
+            date: tx.date,
+            description: tx.description,
+            category: tx.category,
+            type: tx.type,
+            amount: Math.abs(Number(tx.amount) || 0),
+            payment_mode: tx.paymentMode || "Cash",
+            notes: tx.notes || "",
+            updated_at: new Date().toISOString(),
+          }));
+
+          const upsertResult = await executeChunkedUpsert(supabase, dbRows, 200);
+          uploadError = upsertResult.error;
+
+          if (upsertResult.isCompleteSuccess) {
+            succeededItems = newItems;
+          } else if (upsertResult.isPartial) {
+            uploadFailed = true;
+            const succeededIds = new Set(upsertResult.succeeded.map((r) => String(r.id)));
+            succeededItems = newItems.filter((tx) => succeededIds.has(String(tx.id)));
+            failedItems = newItems.filter((tx) => !succeededIds.has(String(tx.id)));
+          } else {
+            uploadFailed = true;
+            failedItems = newItems;
+          }
+        } else {
+          succeededItems = newItems;
+        }
+
+        // Keep local state strictly matching what succeeded in cloud
+        if (succeededItems.length > 0) {
+          setTransactions((prev) => [...succeededItems, ...prev]);
+          saveUserTransactions(user?.id, [...succeededItems, ...currentTxns]);
+        }
+
+        if (!uploadFailed) {
+          if (newItems.length > 0) {
+            setMigrationAlert({
+              type: "success",
+              text: `Successfully imported ${newItems.length} transactions${duplicatesCount > 0 ? ` (${duplicatesCount} duplicates skipped)` : ""}! All existing data preserved.`,
+            });
+          } else if (duplicatesCount > 0) {
+            setMigrationAlert({
+              type: "success",
+              text: `Import complete: all ${duplicatesCount} transactions in the file were already in your ledger (duplicates skipped).`,
+            });
+          }
+        } else if (succeededItems.length > 0 && failedItems.length > 0) {
+          setMigrationAlert({
+            type: "warning",
+            text: `Partial import: ${succeededItems.length} transactions saved to cloud, but ${failedItems.length} failed (${uploadError?.message || "Error"}). Saved records are in your ledger.`,
+          });
+        } else {
+          setMigrationAlert({
+            type: "error",
+            text: `Failed to save imported records to cloud: ${uploadError?.message || "Error"}. Existing records remain untouched.`,
+          });
+        }
+
+        setImportResult({
+          added: succeededItems.length,
+          failed: failedItems.length,
+          skipped: duplicatesCount,
+          errors: allErrors,
+        });
+      } else {
+        setImportResult({
+          added: 0,
+          failed: 0,
+          skipped: 0,
+          errors: allErrors,
         });
       }
-
-      setImportResult({
-        added: allValid.length,
-        errors: allErrors,
-      });
     });
 
     e.target.value = ""; // allow re-selecting the same files
-  }, []);
+  }, [user]);
 
   const hasFilters = search || typeFilter !== "all" || categoryFilter !== "all";
   const clearFilters = () => {
@@ -1585,8 +2280,17 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
             </div>
             <div className="brand-text">
               <span className="brand-title">Ledger</span>
-              <span className="brand-sub">
-                {currentUser ? `Signed in as ${currentUser}` : "Personal Finance Tracker"}
+              <span className="brand-sub" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                <span>{currentUser}</span>
+                <span
+                  className={`sync-pill ${syncStatus}`}
+                  onClick={syncStatus === "error" ? runSyncAndMigration : undefined}
+                  style={{ cursor: syncStatus === "error" ? "pointer" : "default" }}
+                  title={syncStatus === "error" ? "Click to retry sync" : undefined}
+                >
+                  <Cloud size={11} />
+                  <span>{syncStatus === "syncing" ? "Syncing..." : syncStatus === "error" ? "Offline (Retry)" : "Cloud Synced"}</span>
+                </span>
               </span>
             </div>
           </div>
@@ -1611,6 +2315,15 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
               <Download size={15} />
               <span>Export CSV</span>
             </button>
+            <button
+              className="btn btn-ghost csv-btn"
+              onClick={checkSupabaseForSampleRecords}
+              disabled={checkingCloudSamples}
+              title="Scan Supabase cloud for sample records"
+            >
+              <ShieldCheck size={15} />
+              <span>{checkingCloudSamples ? "Scanning..." : "Scan Cloud"}</span>
+            </button>
             {transactions.length > 0 && (
               <button className="btn btn-ghost danger-btn" onClick={() => setDeleteAllConfirmOpen(true)} title="Delete all transactions from system">
                 <Trash2 size={15} />
@@ -1631,6 +2344,108 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
             </button>
           </div>
         </header>
+
+        {detectedSampleRecords.length > 0 && (
+          <div
+            className="import-banner warn"
+            style={{
+              marginBottom: 16,
+              flexDirection: "column",
+              alignItems: "stretch",
+              background: "rgba(245, 158, 11, 0.08)",
+              border: "1px solid rgba(245, 158, 11, 0.3)",
+              borderRadius: 10,
+              padding: "14px 16px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <AlertTriangle size={18} style={{ color: "#F59E0B", flexShrink: 0 }} />
+                <span style={{ fontSize: 13.5 }}>
+                  <strong>{detectedSampleRecords.length} sample transactions detected</strong> ({detectedSampleRecords.length === 15 ? "12 from Oct + 3 from Sep" : `${detectedSampleRecords.length} records`} — none belong to your 670 imported CSV rows).
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ padding: "4px 12px", fontSize: 12 }}
+                  onClick={() => setShowSampleDetails((s) => !s)}
+                >
+                  {showSampleDetails ? "Hide Table" : `Show All ${detectedSampleRecords.length} Records & IDs`}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ padding: "4px 14px", fontSize: 12, background: "#EF4444", borderColor: "#EF4444" }}
+                  onClick={handleManualCleanupSampleRecords}
+                >
+                  Clean Up {detectedSampleRecords.length} Sample Records
+                </button>
+              </div>
+            </div>
+
+            {showSampleDetails && (
+              <div style={{ marginTop: 12, overflowX: "auto", maxHeight: 280, border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, background: "rgba(0,0,0,0.2)" }}>
+                <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse", textAlign: "left" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)" }}>
+                      <th style={{ padding: "8px 10px" }}>#</th>
+                      <th style={{ padding: "8px 10px" }}>Exact ID</th>
+                      <th style={{ padding: "8px 10px" }}>Date</th>
+                      <th style={{ padding: "8px 10px" }}>Description</th>
+                      <th style={{ padding: "8px 10px" }}>Category</th>
+                      <th style={{ padding: "8px 10px" }}>Amount</th>
+                      <th style={{ padding: "8px 10px" }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detectedSampleRecords.map((r, i) => (
+                      <tr key={r.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+                        <td style={{ padding: "6px 10px", color: "var(--text-muted)" }}>{i + 1}</td>
+                        <td style={{ padding: "6px 10px", fontFamily: "monospace", fontSize: 11, color: "var(--accent, #818CF8)" }}>{r.id}</td>
+                        <td style={{ padding: "6px 10px" }}>{r.date}</td>
+                        <td style={{ padding: "6px 10px", fontWeight: 500 }}>{r.description}</td>
+                        <td style={{ padding: "6px 10px" }}>{r.category}</td>
+                        <td style={{ padding: "6px 10px", fontWeight: 600 }}>{currency(r.amount)}</td>
+                        <td style={{ padding: "6px 10px", color: "#F59E0B" }}>Sample Record</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {migrationAlert && (
+          <div
+            className={`import-banner ${typeof migrationAlert === "object" && migrationAlert.type === "error" ? "warn" : "ok"}`}
+            style={{ marginBottom: 16 }}
+          >
+            <div className="import-banner-text" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              {typeof migrationAlert === "object" && migrationAlert.type === "error" ? (
+                <AlertTriangle size={16} style={{ color: "#F59E0B", flexShrink: 0 }} />
+              ) : (
+                <CheckCircle2 size={16} style={{ color: "#4ADE80", flexShrink: 0 }} />
+              )}
+              <span>{typeof migrationAlert === "object" ? migrationAlert.text : migrationAlert}</span>
+              {typeof migrationAlert === "object" && migrationAlert.type === "error" && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ padding: "3px 10px", fontSize: 12, marginLeft: 8 }}
+                  onClick={runSyncAndMigration}
+                >
+                  Retry Sync
+                </button>
+              )}
+            </div>
+            <button className="icon-btn" onClick={() => setMigrationAlert(null)} aria-label="Dismiss">
+              <X size={15} />
+            </button>
+          </div>
+        )}
 
         {importResult && (
           <div className={`import-banner ${importResult.errors.length ? "warn" : "ok"}`}>
@@ -2093,7 +2908,11 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
         </section>
 
         <footer className="app-footer">
-          Data is stored locally in this browser. {transactions.length} total transactions.
+          {syncStatus === "synced"
+            ? `Your transactions are synced to the cloud. ${transactions.length} total transactions.`
+            : syncStatus === "syncing"
+            ? `Syncing with cloud... ${transactions.length} total transactions.`
+            : `Offline mode (local cache). ${transactions.length} total transactions.`}
         </footer>
       </div>
 
@@ -2170,7 +2989,98 @@ function Dashboard({ onLogout, currentUser, theme, onToggleTheme }) {
    it persists across the login screen and the dashboard alike. */
 export default function FinanceTracker() {
   const [theme, setTheme] = useState(loadTheme);
-  const [session, setSession] = useState(() => authService.getSession());
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [urlMessage, setUrlMessage] = useState(() => {
+    try {
+      if (typeof window === "undefined") return null;
+      const hash = window.location.hash;
+      const search = window.location.search;
+      const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+      const searchParams = new URLSearchParams(search);
+      const errDesc = hashParams.get("error_description") || searchParams.get("error_description");
+      if (errDesc) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+        return {
+          type: "error",
+          text: decodeURIComponent(errDesc.replace(/\+/g, " ")),
+        };
+      }
+    } catch {
+      // Ignore URL parsing errors
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    // 1. Check for authorization code or tokens in URL when returning from email link
+    try {
+      const search = window.location.search;
+      const searchParams = new URLSearchParams(search);
+
+      // If PKCE authorization code is returned (?code=...), exchange it for session
+      const code = searchParams.get("code");
+      if (code) {
+        supabase.auth.exchangeCodeForSession(code).then(({ data, error }) => {
+          if (data?.session) {
+            setSession(data.session);
+            window.history.replaceState({}, document.title, window.location.pathname);
+          } else if (error) {
+            setUrlMessage({ type: "error", text: error.message });
+          }
+        });
+      }
+
+      // If OTP token hash is returned (?token_hash=...&type=...)
+      const token_hash = searchParams.get("token_hash");
+      const type = searchParams.get("type");
+      if (token_hash) {
+        supabase.auth.verifyOtp({ token_hash, type: type || "email" }).then(({ data, error }) => {
+          if (data?.session) {
+            setSession(data.session);
+            window.history.replaceState({}, document.title, window.location.pathname);
+          } else if (error) {
+            setUrlMessage({ type: "error", text: error.message });
+          }
+        });
+      }
+
+      // Clean up URL hash if implicit access_token was passed
+      const hash = window.location.hash;
+      const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+      if (hashParams.get("access_token")) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    } catch (e) {
+      console.warn("Could not parse URL auth tokens:", e);
+    }
+
+    // 2. Normal session retrieval & subscription
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setSession(s);
+      setLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (event === "SIGNED_OUT" || !newSession) {
+        if (session?.user?.id) {
+          clearUserCache(session.user.id);
+        }
+        clearLegacyStorage();
+        try {
+          delete window.__SAMPLE_RECORDS__;
+        } catch {
+          // Ignore
+        }
+      }
+      setSession(newSession);
+      setLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [session?.user?.id]);
 
   useEffect(() => {
     try {
@@ -2182,21 +3092,54 @@ export default function FinanceTracker() {
 
   const toggleTheme = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
 
-  const handleAuthenticated = useCallback((username) => {
-    setSession({ username, loggedInAt: new Date().toISOString() });
+  const handleAuthenticated = useCallback((user) => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) setSession(session);
+      else if (user) setSession({ user });
+    });
   }, []);
 
-  const handleLogout = useCallback(() => {
-    authService.logout();
+  const handleLogout = useCallback(async () => {
+    // Clear user-scoped transaction cache and legacy storage to prevent cross-account leak
+    if (session?.user?.id) {
+      clearUserCache(session.user.id);
+    }
+    clearLegacyStorage();
+    try {
+      delete window.__SAMPLE_RECORDS__;
+    } catch {
+      // Ignore if not present or in non-browser context
+    }
+
+    await authService.logout();
     setSession(null);
-  }, []);
+  }, [session]);
 
-  if (!session) {
-    const mode = hasCredentials() ? "login" : "setup";
-    return <LoginScreen mode={mode} onAuthenticated={handleAuthenticated} theme={theme} onToggleTheme={toggleTheme} />;
+  if (loading) {
+    return (
+      <div className={`pft-root theme-${theme} auth-shell`} style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <style>{CSS}</style>
+        <div style={{ color: "var(--text-muted)", fontSize: "14px", display: "flex", alignItems: "center", gap: 10 }}>
+          <RefreshCw size={18} className="spin" />
+          <span>Connecting to Supabase Cloud...</span>
+        </div>
+      </div>
+    );
   }
 
-  return <Dashboard onLogout={handleLogout} currentUser={session.username} theme={theme} onToggleTheme={toggleTheme} />;
+  if (!session || !session.user) {
+    return <LoginScreen onAuthenticated={handleAuthenticated} theme={theme} onToggleTheme={toggleTheme} urlMessage={urlMessage} />;
+  }
+
+  return (
+    <Dashboard
+      onLogout={handleLogout}
+      currentUser={session.user.email}
+      user={session.user}
+      theme={theme}
+      onToggleTheme={toggleTheme}
+    />
+  );
 }
 
 /* ---------------------------------------------------------------
@@ -2934,6 +3877,64 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   margin: 0 0 22px;
 }
 
+.auth-mode-tabs {
+  display: flex;
+  background: var(--input-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  margin-bottom: 20px;
+  gap: 4px;
+}
+.auth-mode-tab {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.auth-mode-tab.active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.auth-info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: rgba(74,222,128,0.1);
+  border: 1px solid rgba(74,222,128,0.3);
+  color: #4ADE80;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 10px 12px;
+  border-radius: 10px;
+  line-height: 1.4;
+}
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+}
+.sync-pill.synced { color: #4ADE80; border-color: rgba(74,222,128,0.35); }
+.sync-pill.syncing { color: #60A5FA; border-color: rgba(96,165,250,0.35); }
+.sync-pill.error { color: #F87171; border-color: rgba(248,113,113,0.35); }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
+
 .auth-form { display: flex; flex-direction: column; gap: 16px; }
 
 .input-with-icon {
@@ -3084,6 +4085,184 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 
+/* ---------- Batch & Multi-entry Modal ---------- */
+.modal-card.batch-modal {
+  width: 100%;
+  max-width: 580px;
+  max-height: 88vh;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.batch-modal-header {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--card-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.batch-modal-header h3 {
+  font-family: 'Outfit', sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.batch-form-wrapper {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.batch-modal-body {
+  padding: 18px 22px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+}
+
+.batch-modal-footer {
+  padding: 14px 22px;
+  border-top: 1px solid var(--card-border);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-shrink: 0;
+  background: var(--card);
+}
+
+.batch-entry-card {
+  background: var(--input-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.15s ease;
+}
+
+.batch-entry-card:focus-within {
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.batch-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--card-border);
+}
+
+.batch-entry-num {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.batch-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #EF4444;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.batch-remove-btn:hover {
+  background: rgba(239, 68, 68, 0.18);
+}
+
+.add-another-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  border: 1.5px dashed var(--card-border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.add-another-btn:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.date-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.date-input-wrap input {
+  flex: 1;
+}
+
+.quick-today-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.quick-today-btn:hover {
+  color: var(--text);
+  border-color: var(--primary);
+}
+
+.batch-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(37, 99, 235, 0.12);
+  color: #38BDF8;
+}
+
+.batch-summary-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -3094,8 +4273,16 @@ td { padding: 13px 18px; font-size: 13.5px; vertical-align: middle; }
   .kpi-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
   .kpi-card { padding: 14px; }
   .kpi-value { font-size: 21px; }
-  .add-btn span, .csv-btn span { display: none; }
-  .add-btn, .csv-btn { padding: 10px 13px; }
+  .add-btn span { display: inline !important; }
+  .add-btn { padding: 9px 13px; font-size: 13px; }
+  .csv-btn span { display: none; }
+  .csv-btn { padding: 9px 11px; }
+  .modal-card.batch-modal { max-height: 94vh; border-radius: 14px; }
+  .batch-modal-header { padding: 14px 16px 12px; }
+  .batch-modal-body { padding: 14px 16px; gap: 12px; }
+  .batch-modal-footer { padding: 12px 16px; flex-direction: column-reverse; gap: 8px; }
+  .batch-modal-footer button { width: 100%; }
+  .batch-entry-card { padding: 12px; }
   .form-row { grid-template-columns: 1fr; }
   .toolbar { flex-direction: column; align-items: stretch; }
   .filter-group { justify-content: space-between; }

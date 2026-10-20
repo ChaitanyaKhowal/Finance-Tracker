@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+.env.local
 
 # Editor directories and files
 .vscode/*
@@ -21,4 +24,7 @@ dist-ssr
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?
+# Backups & scratch
+*.bak
+*.bak*
+scratch/
